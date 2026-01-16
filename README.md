@@ -229,7 +229,3 @@ This project is licensed under the **Creative Commons Attribution-NonCommercial-
 Made with ❤️ by [MIN]
 
 **⭐ Star this repo if you find it useful!**
-
-</div>
-ENDOFREADME
-echo "✅ README.md 创建成功！"
