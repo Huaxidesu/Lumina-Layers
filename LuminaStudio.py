@@ -22,6 +22,8 @@ import trimesh
 from PIL import Image
 import cv2
 from scipy.spatial import KDTree
+import pystray
+import webbrowser
 
 
 def _safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bool = True):
@@ -2149,16 +2151,58 @@ def create_app():
 
     return app
 
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║                                 TRAY                                          ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
+class GradioTray:
+    def __init__(self, port):
+        self.server_port = port
+        self.server_thread = None
+        self.tray_icon = None
+
+    def open_browser(self, icon=None, item=None):
+        """open browser"""
+        url = f"http://127.0.0.1:{self.server_port}"
+        webbrowser.open(url)
+
+    def quit_app(self, icon=None, item=None):
+        """exit"""
+        print("Exit by tray...")
+        if self.tray_icon:
+            self.tray_icon.stop()
+        os._exit(0)
+
+    def setup_tray(self):
+        menu = pystray.Menu(
+            pystray.MenuItem("Open", self.open_browser, default=True),
+            pystray.MenuItem("Exit", self.quit_app)
+        )
+        self.tray_icon = pystray.Icon(
+            "gradio_app",
+            Image.open("gradio.png"),
+            "Gradio App",
+            menu
+        )
+
+    def run(self):
+        print("Launching tray...")
+        self.setup_tray()
+        self.tray_icon.run()
+
 
 # ╔═══════════════════════════════════════════════════════════════════════════════╗
 # ║                              MAIN ENTRY                                       ║
 # ╚═══════════════════════════════════════════════════════════════════════════════╝
 
 if __name__ == "__main__":
+    port = 7860
     app = create_app()
     app.launch(
+        prevent_thread_lock=True,
         inbrowser=True,
-        server_port=7860,
+        server_port=port,
         share=False,
         show_error=True
     )
+    tray = GradioTray(port)
+    tray.run()
