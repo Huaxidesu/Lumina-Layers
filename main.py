@@ -1,6 +1,10 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
+<<<<<<< Updated upstream
 ║                          LUMINA STUDIO v1.4.2                                 ║
+=======
+║                          LUMINA STUDIO v1.5.0                                 ║
+>>>>>>> Stashed changes
 ║                    Multi-Material 3D Print Color System                       ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Author: [MIN]                                                                ║
@@ -12,7 +16,17 @@ Main Entry Point
 
 import os
 
-# 设置 Gradio 临时目录到项目目录，避免写入 C 盘临时目录
+# ========== Monkey Patch: Fix colormath compatibility with numpy 1.20+ ==========
+# This must run before any other imports that might use colormath
+import numpy as np
+
+def patch_asscalar(a):
+    return a.item()
+
+setattr(np, "asscalar", patch_asscalar)
+
+# ========== Configure Gradio Temp Directory ==========
+# Set Gradio temp directory to project folder to avoid writing to system temp
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _GRADIO_TEMP = os.path.join(_PROJECT_ROOT, "output", ".gradio_cache")
 os.makedirs(_GRADIO_TEMP, exist_ok=True)
@@ -48,20 +62,19 @@ def start_browser(port):
     webbrowser.open(f"http://127.0.0.1:{port}")
 
 if __name__ == "__main__":
-
-    # 1. Initialize System Tray
+    # Initialize system tray
     tray = None
-    PORT = 7860 # Default fallback
+    PORT = 7860
     try:
         PORT = find_available_port(7860)
         tray = LuminaTray(port=PORT)
     except Exception as e:
         print(f"⚠️ Warning: Failed to initialize tray: {e}")
 
-    # 2. Start Browser Thread (Fix: Added args=(PORT,))
+    # Start browser thread
     threading.Thread(target=start_browser, args=(PORT,), daemon=True).start()
 
-    # 3. Launch Gradio App
+    # Launch Gradio app
     print(f"✨ Lumina Studio is running on http://127.0.0.1:{PORT}")
     app = create_app()
 
@@ -81,14 +94,13 @@ if __name__ == "__main__":
     except BaseException as e:
         raise
 
-    # 4. Start System Tray (Blocking) or Keep Alive
+    # Start system tray (blocking) or keep alive
     if tray:
         try:
             print("🚀 Starting System Tray...")
             tray.run()
         except Exception as e:
             print(f"⚠️ Warning: System tray crashed: {e}")
-            # Fallback if tray crashes immediately
             try:
                 while True:
                     time.sleep(1)

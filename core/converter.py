@@ -1,7 +1,7 @@
 """
 Lumina Studio - Image Converter Coordinator (Refactored)
-Image conversion coordinator - Refactored version
-Coordinates modules to complete image-to-3D model conversion
+
+Coordinates modules to complete image-to-3D model conversion.
 """
 
 import os
@@ -14,7 +14,6 @@ import gradio as gr
 from config import PrinterConfig, ColorSystem, PREVIEW_SCALE, PREVIEW_MARGIN, OUTPUT_DIR
 from utils import Stats, safe_fix_3mf_names
 
-# Import refactored modules
 from core.image_processing import LuminaImageProcessor
 from core.mesh_generators import get_mesher
 from core.geometry_utils import create_keychain_loop
@@ -22,12 +21,12 @@ from core.geometry_utils import create_keychain_loop
 
 # ========== Debug Helper Functions ==========
 
-def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mode_name):
+def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mode_name, num_materials=4):
     """
-    Save vector mode debug preview image
+    Save high-fidelity mode debug preview image.
     
-    Shows the K-Means quantized image, which is the actual input the vectorizer receives
-    Optional: Draw contours on the image to show shape recognition results
+    Shows the K-Means quantized image, which is the actual input the vectorizer receives.
+    Optionally draws contours to show shape recognition results.
     
     Args:
         debug_data: Debug data dictionary
@@ -35,6 +34,7 @@ def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mod
         mask_solid: Solid mask
         image_path: Original image path
         mode_name: Mode name
+        num_materials: Number of materials (4 or 6), default 4
     """
     quantized_image = debug_data['quantized_image']
     num_colors = debug_data['num_colors']
@@ -42,16 +42,13 @@ def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mod
     print(f"[DEBUG_PREVIEW] Saving {mode_name} debug preview...")
     print(f"[DEBUG_PREVIEW] Quantized to {num_colors} colors")
     
-    # Create debug image (RGB format)
     debug_img = quantized_image.copy()
     
-    # Optional: Draw contours to show how the vectorizer interprets shapes
+    # Draw contours to show how the vectorizer interprets shapes
     try:
-        # Draw contours for each material
         contour_overlay = debug_img.copy()
         
-        for mat_id in range(4):
-            # Get mask for this material
+        for mat_id in range(num_materials):
             mat_mask = np.zeros(material_matrix.shape[:2], dtype=np.uint8)
             for layer in range(material_matrix.shape[2]):
                 mat_mask = np.logical_or(mat_mask, material_matrix[:, :, layer] == mat_id)
@@ -61,12 +58,10 @@ def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mod
             if not np.any(mat_mask):
                 continue
             
-            # Find contours
             contours, _ = cv2.findContours(
                 mat_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
             )
             
-            # Draw contours (black thin lines)
             cv2.drawContours(contour_overlay, contours, -1, (0, 0, 0), 1)
         
         debug_img = contour_overlay
@@ -75,11 +70,9 @@ def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mod
     except Exception as e:
         print(f"[DEBUG_PREVIEW] Warning: Could not draw contours: {e}")
     
-    # Save debug image
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     debug_path = os.path.join(OUTPUT_DIR, f"{base_name}_{mode_name}_Debug.png")
     
-    # Convert to PIL image and save
     debug_pil = Image.fromarray(debug_img, mode='RGB')
     debug_pil.save(debug_path, 'PNG')
     
@@ -95,9 +88,9 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                          modeling_mode="vector", quantize_colors=32,
                          blur_kernel=0, smooth_sigma=10):
     """
-    Main conversion function: Convert image to 3D model
+    Main conversion function: Convert image to 3D model.
     
-    This is the refactored coordinator function responsible for:
+    This refactored coordinator function is responsible for:
     1. Calling LuminaImageProcessor to process the image
     2. Calling get_mesher to get the mesh generator
     3. Generating meshes for each material
@@ -105,9 +98,26 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     5. Exporting 3MF file
     
     Args:
+        image_path: Path to input image
         lut_path: LUT file path (string) or Gradio File object
+        target_width_mm: Target width in millimeters
+        spacer_thick: Backing thickness in mm
+        structure_mode: "Double-sided" or "Single-sided"
+        auto_bg: Enable automatic background removal
+        bg_tol: Background tolerance value
+        color_mode: Color system mode (CMYW/RYBW/6-Color)
+        add_loop: Enable keychain loop
+        loop_width: Loop width in mm
+        loop_length: Loop length in mm
+        loop_hole: Loop hole diameter in mm
+        loop_pos: Loop position (x, y) tuple
+        modeling_mode: Modeling mode ("vector"/"pixel")
+        quantize_colors: Number of colors for K-Means quantization
         blur_kernel: Median filter kernel size (0=disabled, recommended 0-5, default 0)
         smooth_sigma: Bilateral filter sigma value (recommended 5-20, default 10)
+    
+    Returns:
+        Tuple of (3mf_path, glb_path, preview_image, status_message)
     """
     # Input validation
     if image_path is None:
@@ -128,12 +138,11 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     print(f"[CONVERTER] Filters: blur_kernel={blur_kernel}, smooth_sigma={smooth_sigma}")
     print(f"[CONVERTER] LUT: {actual_lut_path}")
     
-    # Get color configuration
     color_conf = ColorSystem.get(color_mode)
     slot_names = color_conf['slots']
     preview_colors = color_conf['preview']
     
-    # ========== Step 1: Image Processing ==========
+    # Step 1: Image Processing
     try:
         processor = LuminaImageProcessor(actual_lut_path, color_mode)
         result = processor.process_image(
@@ -149,7 +158,6 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     except Exception as e:
         return None, None, None, f"❌ Image processing failed: {e}"
     
-    # Extract processing results
     matched_rgb = result['matched_rgb']
     material_matrix = result['material_matrix']
     mask_solid = result['mask_solid']
@@ -160,25 +168,27 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     
     print(f"[CONVERTER] Image processed: {target_w}×{target_h}px, scale={pixel_scale}mm/px")
     
-    # ========== Step 2: Save Debug Preview (High-Fidelity mode only) ==========
+    # Step 2: Save Debug Preview (High-Fidelity mode only)
     if debug_data is not None and mode_info['use_high_fidelity']:
         try:
+            num_materials = len(slot_names)
             _save_debug_preview(
                 debug_data=debug_data,
                 material_matrix=material_matrix,
                 mask_solid=mask_solid,
                 image_path=image_path,
-                mode_name=mode_info['name']
+                mode_name=mode_info['name'],
+                num_materials=num_materials
             )
         except Exception as e:
             print(f"[CONVERTER] Warning: Failed to save debug preview: {e}")
     
-    # ========== Step 3: Generate Preview Image ==========
+    # Step 3: Generate Preview Image
     preview_rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
     preview_rgba[mask_solid, :3] = matched_rgb[mask_solid]
     preview_rgba[mask_solid, 3] = 255
     
-    # ========== Step 4: Handle Keychain Loop ==========
+    # Step 4: Handle Keychain Loop
     loop_info = None
     if add_loop and loop_pos is not None:
         loop_info = _calculate_loop_info(
@@ -187,14 +197,13 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         )
         
         if loop_info:
-            # Draw loop on preview image
             preview_rgba = _draw_loop_on_preview(
                 preview_rgba, loop_info, color_conf, pixel_scale
             )
     
     preview_img = Image.fromarray(preview_rgba, mode='RGBA')
     
-    # ========== Step 5: Build Voxel Matrix ==========
+    # Step 5: Build Voxel Matrix
     full_matrix = _build_voxel_matrix(
         material_matrix, mask_solid, spacer_thick, structure_mode
     )
@@ -202,26 +211,24 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     total_layers = full_matrix.shape[0]
     print(f"[CONVERTER] Voxel matrix: {full_matrix.shape} (Z×H×W)")
     
-# ========== Step 6: Generate 3D Meshes ==========
+    # Step 6: Generate 3D Meshes
     scene = trimesh.Scene()
     
-    # Create transformation matrix (pixel → millimeter)
     transform = np.eye(4)
-    transform[0, 0] = pixel_scale  # X
-    transform[1, 1] = pixel_scale  # Y
-    transform[2, 2] = PrinterConfig.LAYER_HEIGHT  # Z
+    transform[0, 0] = pixel_scale
+    transform[1, 1] = pixel_scale
+    transform[2, 2] = PrinterConfig.LAYER_HEIGHT
     
     print(f"[CONVERTER] Transform: XY={pixel_scale}mm/px, Z={PrinterConfig.LAYER_HEIGHT}mm/layer")
     
-    # Get mesh generator
     mesher = get_mesher(modeling_mode)
     print(f"[CONVERTER] Using mesher: {mesher.__class__.__name__}")
     
-    # [FIX] Track which slots actually have meshes
     valid_slot_names = []
+    num_materials = len(slot_names)
+    print(f"[CONVERTER] Generating meshes for {num_materials} materials...")
 
-    # Generate mesh for each material
-    for mat_id in range(4):
+    for mat_id in range(num_materials):
         mesh = mesher.generate_mesh(full_matrix, mat_id, target_h)
         if mesh:
             mesh.apply_transform(transform)
@@ -233,11 +240,10 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 node_name=name, 
                 geom_name=name
             )
-            # [FIX] Only add name if mesh exists
             valid_slot_names.append(name)
             print(f"[CONVERTER] Added mesh for {name}")
     
-    # ========== Step 7: Add Keychain Loop ==========
+    # Step 7: Add Keychain Loop
     loop_added = False
     
     if add_loop and loop_info is not None:
@@ -260,31 +266,27 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                     node_name="Keychain_Loop", 
                     geom_name="Keychain_Loop"
                 )
-                # [FIX] Add loop to valid names
                 valid_slot_names.append("Keychain_Loop")
                 loop_added = True
                 print(f"[CONVERTER] Loop added successfully")
         except Exception as e:
             print(f"[CONVERTER] Loop creation failed: {e}")
     
-    # ========== Step 8: Export 3MF ==========
+    # Step 8: Export 3MF
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     out_path = os.path.join(OUTPUT_DIR, f"{base_name}_Lumina.3mf")
     scene.export(out_path)
     
-    # Fix 3MF object names
-    # [FIX] Use the filtered list instead of the full list
     safe_fix_3mf_names(out_path, valid_slot_names)
     
     print(f"[CONVERTER] 3MF exported: {out_path}")
     
-    # ========== Step 9: Generate 3D Preview ==========
+    # Step 9: Generate 3D Preview
     preview_mesh = _create_preview_mesh(matched_rgb, mask_solid, total_layers)
     
     if preview_mesh:
         preview_mesh.apply_transform(transform)
         
-        # Add loop to preview
         if loop_added and loop_info:
             try:
                 preview_loop = create_keychain_loop(
@@ -308,7 +310,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     else:
         glb_path = None
     
-    # ========== Step 10: Generate Status Message ==========
+    # Step 10: Generate Status Message
     Stats.increment("conversions")
     
     mode_name = mode_info['name']
@@ -331,7 +333,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
 
 def _calculate_loop_info(loop_pos, loop_width, loop_length, loop_hole,
                          mask_solid, material_matrix, target_w, target_h, pixel_scale):
-    """Calculate keychain loop information"""
+    """Calculate keychain loop information."""
     solid_rows = np.any(mask_solid, axis=1)
     if not np.any(solid_rows):
         return None
@@ -342,7 +344,6 @@ def _calculate_loop_info(loop_pos, loop_width, loop_length, loop_hole,
     attach_col = max(0, min(target_w - 1, attach_col))
     attach_row = max(0, min(target_h - 1, attach_row))
     
-    # Find nearest solid row
     col_mask = mask_solid[:, attach_col]
     if np.any(col_mask):
         solid_rows_in_col = np.where(col_mask)[0]
@@ -361,7 +362,6 @@ def _calculate_loop_info(loop_pos, loop_width, loop_length, loop_hole,
     
     attach_col = max(0, min(target_w - 1, attach_col))
     
-    # Detect loop color
     loop_color_id = 0
     search_area = material_matrix[
         max(0, top_row-2):top_row+3,
@@ -386,13 +386,12 @@ def _calculate_loop_info(loop_pos, loop_width, loop_length, loop_hole,
 
 
 def _draw_loop_on_preview(preview_rgba, loop_info, color_conf, pixel_scale):
-    """Draw keychain loop on preview image"""
+    """Draw keychain loop on preview image."""
     preview_pil = Image.fromarray(preview_rgba, mode='RGBA')
     draw = ImageDraw.Draw(preview_pil)
     
     loop_color_rgba = tuple(color_conf['preview'][loop_info['color_id']][:3]) + (255,)
     
-    # Convert to pixel coordinates
     attach_col = int(loop_info['attach_x_mm'] / pixel_scale)
     attach_row = int((preview_rgba.shape[0] - 1) - loop_info['attach_y_mm'] / pixel_scale)
     
@@ -401,7 +400,6 @@ def _draw_loop_on_preview(preview_rgba, loop_info, color_conf, pixel_scale):
     hole_r_px = int(loop_info['hole_dia_mm'] / 2 / pixel_scale)
     circle_r_px = loop_w_px // 2
     
-    # Calculate positions
     loop_bottom = attach_row
     loop_left = attach_col - loop_w_px // 2
     loop_right = attach_col + loop_w_px // 2
@@ -413,21 +411,18 @@ def _draw_loop_on_preview(preview_rgba, loop_info, color_conf, pixel_scale):
     circle_center_y = rect_top
     circle_center_x = attach_col
     
-    # Draw rectangle
     if rect_h_px > 0:
         draw.rectangle(
             [loop_left, rect_top, loop_right, rect_bottom], 
             fill=loop_color_rgba
         )
     
-    # Draw semicircle
     draw.ellipse(
         [circle_center_x - circle_r_px, circle_center_y - circle_r_px,
          circle_center_x + circle_r_px, circle_center_y + circle_r_px],
         fill=loop_color_rgba
     )
     
-    # Draw hole
     draw.ellipse(
         [circle_center_x - hole_r_px, circle_center_y - hole_r_px,
          circle_center_x + hole_r_px, circle_center_y + hole_r_px],
@@ -438,42 +433,33 @@ def _draw_loop_on_preview(preview_rgba, loop_info, color_conf, pixel_scale):
 
 
 def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mode):
-    """Build complete voxel matrix"""
+    """Build complete voxel matrix."""
     target_h, target_w = material_matrix.shape[:2]
     mask_transparent = ~mask_solid
     
-    # Transpose material matrix (H, W, Layers) → (Layers, H, W)
     bottom_voxels = np.transpose(material_matrix, (2, 0, 1))
     
-    # Calculate backing layers
     spacer_layers = max(1, int(round(spacer_thick / PrinterConfig.LAYER_HEIGHT)))
     
     if "双面" in structure_mode or "Double" in structure_mode:
-        # Double-sided mode
         top_voxels = np.transpose(material_matrix[..., ::-1], (2, 0, 1))
         total_layers = 5 + spacer_layers + 5
         full_matrix = np.full((total_layers, target_h, target_w), -1, dtype=int)
         
-        # Bottom layers
         full_matrix[0:5] = bottom_voxels
         
-        # Backing
         spacer = np.full((target_h, target_w), -1, dtype=int)
         spacer[~mask_transparent] = 0
         for z in range(5, 5 + spacer_layers):
             full_matrix[z] = spacer
         
-        # Top layers
         full_matrix[5 + spacer_layers:] = top_voxels
     else:
-        # Single-sided mode
         total_layers = 5 + spacer_layers
         full_matrix = np.full((total_layers, target_h, target_w), -1, dtype=int)
         
-        # Bottom layers
         full_matrix[0:5] = bottom_voxels
         
-        # Backing
         spacer = np.full((target_h, target_w), -1, dtype=int)
         spacer[~mask_transparent] = 0
         for z in range(5, total_layers):
@@ -484,8 +470,15 @@ def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mod
 
 def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
     """
-    Create simplified 3D preview mesh
-    For display in browser
+    Create simplified 3D preview mesh for browser display.
+    
+    Args:
+        matched_rgb: RGB color array
+        mask_solid: Boolean mask of solid pixels
+        total_layers: Total number of Z layers
+    
+    Returns:
+        Trimesh object or None if model too large
     """
     height, width = matched_rgb.shape[:2]
     total_pixels = width * height
@@ -494,13 +487,11 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
     SIMPLIFY_THRESHOLD = 500_000
     TARGET_PIXELS = 300_000
     
-    # Check if preview needs to be disabled
     if total_pixels > DISABLE_THRESHOLD:
         print(f"[PREVIEW] Model too large ({total_pixels:,} pixels)")
         print(f"[PREVIEW] 3D preview disabled to prevent crash")
         return None
     
-    # Check if downsampling is needed
     if total_pixels > SIMPLIFY_THRESHOLD:
         scale_factor = int(np.sqrt(total_pixels / TARGET_PIXELS))
         scale_factor = max(2, min(scale_factor, 16))
@@ -524,7 +515,6 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
     else:
         shrink = 0.05
     
-    # Generate voxel mesh
     vertices = []
     faces = []
     face_colors = []
@@ -549,12 +539,12 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
             ])
             
             cube_faces = [
-                [0, 2, 1], [0, 3, 2],  # bottom
-                [4, 5, 6], [4, 6, 7],  # top
-                [0, 1, 5], [0, 5, 4],  # front
-                [1, 2, 6], [1, 6, 5],  # right
-                [2, 3, 7], [2, 7, 6],  # back
-                [3, 0, 4], [3, 4, 7]   # left
+                [0, 2, 1], [0, 3, 2],
+                [4, 5, 6], [4, 6, 7],
+                [0, 1, 5], [0, 5, 4],
+                [1, 2, 6], [1, 6, 5],
+                [2, 3, 7], [2, 7, 6],
+                [3, 0, 4], [3, 4, 7]
             ]
             
             for f in cube_faces:
@@ -578,17 +568,15 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
 def generate_preview_cached(image_path, lut_path, target_width_mm,
                             auto_bg, bg_tol, color_mode):
     """
-    Generate preview and cache data
-    For 2D preview interface
+    Generate preview and cache data for 2D preview interface.
     
-    Uses same smart defaults for consistency
+    Uses same smart defaults for consistency.
     """
     if image_path is None:
         return None, None, "❌ Please upload an image"
     if lut_path is None:
         return None, None, "⚠️ Please select or upload calibration file"
     
-    # Handle LUT path (supports string path or Gradio File object)
     if isinstance(lut_path, str):
         actual_lut_path = lut_path
     elif hasattr(lut_path, 'name'):
@@ -598,17 +586,16 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
     
     color_conf = ColorSystem.get(color_mode)
     
-    # Use simplified processing pipeline (pixel mode)
     try:
         processor = LuminaImageProcessor(actual_lut_path, color_mode)
         result = processor.process_image(
             image_path=image_path,
             target_width_mm=target_width_mm,
-            modeling_mode="pixel",  # Preview uses pixel mode
+            modeling_mode="pixel",
             quantize_colors=16,
             auto_bg=auto_bg,
             bg_tol=bg_tol,
-            blur_kernel=0,      # Preview also uses same defaults
+            blur_kernel=0,
             smooth_sigma=10
         )
     except Exception as e:
@@ -619,12 +606,10 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
     mask_solid = result['mask_solid']
     target_w, target_h = result['dimensions']
     
-    # Generate preview image
     preview_rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
     preview_rgba[mask_solid, :3] = matched_rgb[mask_solid]
     preview_rgba[mask_solid, 3] = 255
     
-    # Cache data
     cache = {
         'target_w': target_w,
         'target_h': target_h,
@@ -635,7 +620,6 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         'color_conf': color_conf
     }
     
-    # Render preview with grid
     display = render_preview(
         preview_rgba, None, 0, 0, 0, 0, False, color_conf
     )
@@ -645,9 +629,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
 
 def render_preview(preview_rgba, loop_pos, loop_width, loop_length, 
                    loop_hole, loop_angle, loop_enabled, color_conf):
-    """
-    Render preview with keychain loop and coordinate grid
-    """
+    """Render preview with keychain loop and coordinate grid."""
     h, w = preview_rgba.shape[:2]
     new_w, new_h = w * PREVIEW_SCALE, h * PREVIEW_SCALE
     
@@ -655,35 +637,29 @@ def render_preview(preview_rgba, loop_pos, loop_width, loop_length,
     canvas_w = new_w + margin
     canvas_h = new_h + margin
     
-    # Create canvas
     canvas = Image.new('RGBA', (canvas_w, canvas_h), (240, 240, 245, 255))
     draw = ImageDraw.Draw(canvas)
     
-    # Draw grid
     grid_color = (220, 220, 225, 255)
     grid_color_main = (200, 200, 210, 255)
     
     grid_step = 10 * PREVIEW_SCALE
     main_step = 50 * PREVIEW_SCALE
     
-    # Fine grid
     for x in range(margin, canvas_w, grid_step):
         draw.line([(x, margin), (x, canvas_h)], fill=grid_color, width=1)
     for y in range(margin, canvas_h, grid_step):
         draw.line([(margin, y), (canvas_w, y)], fill=grid_color, width=1)
     
-    # Coarse grid
     for x in range(margin, canvas_w, main_step):
         draw.line([(x, margin), (x, canvas_h)], fill=grid_color_main, width=1)
     for y in range(margin, canvas_h, main_step):
         draw.line([(margin, y), (canvas_w, y)], fill=grid_color_main, width=1)
     
-    # Coordinate axes
     axis_color = (100, 100, 120, 255)
     draw.line([(margin, margin), (margin, canvas_h)], fill=axis_color, width=2)
     draw.line([(margin, canvas_h - 1), (canvas_w, canvas_h - 1)], fill=axis_color, width=2)
     
-    # Coordinate labels
     label_color = (80, 80, 100, 255)
     try:
         font = ImageFont.load_default()
@@ -701,12 +677,10 @@ def render_preview(preview_rgba, loop_pos, loop_width, loop_length,
         if font:
             draw.text((5, y - 5), str(px_value), fill=label_color, font=font)
     
-    # Paste image
     pil_img = Image.fromarray(preview_rgba, mode='RGBA')
     pil_img = pil_img.resize((new_w, new_h), Image.Resampling.NEAREST)
     canvas.paste(pil_img, (margin, 0), pil_img)
     
-    # Draw keychain loop
     if loop_enabled and loop_pos is not None:
         canvas = _draw_loop_on_canvas(
             canvas, loop_pos, loop_width, loop_length, 
@@ -718,7 +692,7 @@ def render_preview(preview_rgba, loop_pos, loop_width, loop_length,
 
 def _draw_loop_on_canvas(pil_img, loop_pos, loop_width, loop_length, 
                          loop_hole, loop_angle, color_conf, margin):
-    """Draw keychain loop marker on canvas"""
+    """Draw keychain loop marker on canvas."""
     loop_w_px = int(loop_width / PrinterConfig.NOZZLE_WIDTH * PREVIEW_SCALE)
     loop_h_px = int(loop_length / PrinterConfig.NOZZLE_WIDTH * PREVIEW_SCALE)
     hole_r_px = int(loop_hole / 2 / PrinterConfig.NOZZLE_WIDTH * PREVIEW_SCALE)
@@ -727,7 +701,6 @@ def _draw_loop_on_canvas(pil_img, loop_pos, loop_width, loop_length,
     cx = int(loop_pos[0] * PREVIEW_SCALE) + margin
     cy = int(loop_pos[1] * PREVIEW_SCALE)
     
-    # Create loop layer
     loop_size = max(loop_w_px, loop_h_px) * 2 + 20
     loop_layer = Image.new('RGBA', (loop_size, loop_size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(loop_layer)
@@ -738,34 +711,29 @@ def _draw_loop_on_canvas(pil_img, loop_pos, loop_width, loop_length,
     loop_color = (220, 60, 60, 200)
     outline_color = (255, 255, 255, 255)
     
-    # Draw rectangle
     draw.rectangle(
         [lc - loop_w_px//2, lc, lc + loop_w_px//2, lc + rect_h],
         fill=loop_color, outline=outline_color, width=2
     )
     
-    # Draw semicircle
     draw.ellipse(
         [lc - circle_r_px, lc - circle_r_px,
          lc + circle_r_px, lc + circle_r_px],
         fill=loop_color, outline=outline_color, width=2
     )
     
-    # Draw hole
     draw.ellipse(
         [lc - hole_r_px, lc - hole_r_px,
          lc + hole_r_px, lc + hole_r_px],
         fill=(0, 0, 0, 0)
     )
     
-    # Rotate
     if loop_angle != 0:
         loop_layer = loop_layer.rotate(
             -loop_angle, center=(lc, lc),
             expand=False, resample=Image.BICUBIC
         )
     
-    # Paste to canvas
     paste_x = cx - lc
     paste_y = cy - lc - rect_h // 2
     pil_img.paste(loop_layer, (paste_x, paste_y), loop_layer)
@@ -774,14 +742,13 @@ def _draw_loop_on_canvas(pil_img, loop_pos, loop_width, loop_length,
 
 
 def on_preview_click(cache, loop_pos, evt: gr.SelectData):
-    """Handle preview image click event"""
+    """Handle preview image click event."""
     if evt is None or cache is None:
         return loop_pos, False, "Invalid click - please generate preview first"
     
     click_x, click_y = evt.index
     click_x = click_x - PREVIEW_MARGIN
     
-    # Convert to original coordinates
     orig_x = click_x / PREVIEW_SCALE
     orig_y = click_y / PREVIEW_SCALE
     
@@ -796,7 +763,7 @@ def on_preview_click(cache, loop_pos, evt: gr.SelectData):
 
 def update_preview_with_loop(cache, loop_pos, add_loop,
                             loop_width, loop_length, loop_hole, loop_angle):
-    """Update preview image (with keychain loop)"""
+    """Update preview image with keychain loop."""
     if cache is None:
         return None
     
@@ -813,7 +780,7 @@ def update_preview_with_loop(cache, loop_pos, add_loop,
 
 
 def on_remove_loop():
-    """Remove keychain loop"""
+    """Remove keychain loop."""
     return None, False, 0, "Loop removed"
 
 
@@ -822,10 +789,9 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
                         add_loop, loop_width, loop_length, loop_hole, loop_pos,
                         modeling_mode="vector", quantize_colors=64):
     """
-    Wrapper function for generating final model
-    Directly calls main conversion function
+    Wrapper function for generating final model.
     
-    Uses smart defaults:
+    Directly calls main conversion function with smart defaults:
     - blur_kernel=0 (disable median filter, preserve details)
     - smooth_sigma=10 (gentle bilateral filter, preserve edges)
     """
@@ -834,6 +800,6 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         structure_mode, auto_bg, bg_tol, color_mode,
         add_loop, loop_width, loop_length, loop_hole, loop_pos,
         modeling_mode, quantize_colors,
-        blur_kernel=0,      # Disable median filter - preserve high-frequency details
-        smooth_sigma=10     # Gentle bilateral filter - preserve edges
+        blur_kernel=0,
+        smooth_sigma=10
     )

@@ -8,7 +8,7 @@ import gradio as gr
 from core.i18n import I18n
 from config import ColorSystem
 from utils import Stats, LUTManager
-from core.calibration import generate_calibration_board
+from core.calibration import generate_calibration_board, generate_smart_board
 from core.extractor import (
     rotate_image,
     draw_corner_points,
@@ -392,7 +392,8 @@ def create_converter_tab_content(lang: str) -> dict:
             components['radio_conv_color_mode'] = gr.Radio(
                 choices=[
                     I18n.get('conv_color_mode_cmyw', lang),
-                    I18n.get('conv_color_mode_rybw', lang)
+                    I18n.get('conv_color_mode_rybw', lang),
+                    "6-Color (Smart 1296)"  # New 6-color option
                 ],
                 value=I18n.get('conv_color_mode_rybw', lang),
                 label=I18n.get('conv_color_mode', lang)
@@ -663,7 +664,8 @@ def create_calibration_tab_content(lang: str) -> dict:
             components['radio_cal_color_mode'] = gr.Radio(
                 choices=[
                     I18n.get('conv_color_mode_cmyw', lang),
-                    I18n.get('conv_color_mode_rybw', lang)
+                    I18n.get('conv_color_mode_rybw', lang),
+                    "6-Color (Smart 1296)"  # New 6-color option
                 ],
                 value=I18n.get('conv_color_mode_rybw', lang),
                 label=I18n.get('cal_color_mode', lang)
@@ -708,9 +710,18 @@ def create_calibration_tab_content(lang: str) -> dict:
                 label=I18n.get('cal_download', lang)
             )
     
-    # Event binding
+    # Event binding - Call different generator based on mode
+    def generate_board_wrapper(color_mode, block_size, gap, backing):
+        """Wrapper function to call appropriate generator based on mode"""
+        if "6-Color" in color_mode:
+            # Call Smart 1296 generator
+            return generate_smart_board(block_size, gap)
+        else:
+            # Call traditional 4-color generator
+            return generate_calibration_board(color_mode, block_size, gap, backing)
+    
     components['btn_cal_generate_btn'].click(
-            generate_calibration_board,
+            generate_board_wrapper,
             inputs=[
                 components['radio_cal_color_mode'],
                 components['slider_cal_block_size'],
@@ -748,7 +759,8 @@ def create_extractor_tab_content(lang: str) -> dict:
             components['radio_ext_color_mode'] = gr.Radio(
                 choices=[
                     I18n.get('conv_color_mode_cmyw', lang),
-                    I18n.get('conv_color_mode_rybw', lang)
+                    I18n.get('conv_color_mode_rybw', lang),
+                    "6-Color (Smart 1296)"  # New 6-color option
                 ],
                 value=I18n.get('conv_color_mode_rybw', lang),
                 label=I18n.get('ext_color_mode', lang)
@@ -903,7 +915,8 @@ def create_extractor_tab_content(lang: str) -> dict:
             ext_state_img, ext_state_pts,
             components['slider_ext_offset_x'], components['slider_ext_offset_y'],
             components['slider_ext_zoom'], components['slider_ext_distortion'],
-            components['checkbox_ext_wb'], components['checkbox_ext_vignette']
+            components['checkbox_ext_wb'], components['checkbox_ext_vignette'],
+            components['radio_ext_color_mode']  # Add color_mode parameter
     ]
     extract_outputs = [
             ext_warp_view, ext_lut_view,

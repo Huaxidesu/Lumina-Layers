@@ -1,6 +1,10 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
+<<<<<<< Updated upstream
 ║                          LUMINA STUDIO v1.4.2                                 ║
+=======
+║                          LUMINA STUDIO v1.5.0                                 ║
+>>>>>>> Stashed changes
 ║                    Multi-Material 3D Print Color System                       ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Author: [MIN]                                                                ║
@@ -104,7 +108,11 @@ class LuminaTray:
         self.icon = pystray.Icon(
             "LuminaStudio",
             image,
+<<<<<<< Updated upstream
             "Lumina Studio v1.4.2",
+=======
+            "Lumina Studio v1.5.0",
+>>>>>>> Stashed changes
             menu
         )
 

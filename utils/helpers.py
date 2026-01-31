@@ -55,10 +55,10 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
             # Process in reverse order to preserve positions (for name fixing)
             for idx, (start, end, old_tag, obj_id) in enumerate(reversed(obj_info)):
                 real_idx = len(obj_info) - 1 - idx
-                if real_idx >= len(slot_names):
-                    continue
-
-                color_name = slot_names[real_idx]
+                
+                # [FIX] Use modulo to cycle through slot_names if there are more objects
+                # This ensures all objects get a color name, even if there are multiple layers
+                color_name = slot_names[real_idx % len(slot_names)]
 
                 # Remove existing name attribute and add new one
                 new_tag = re.sub(r'\s+name="[^"]*"', '', old_tag)
@@ -67,7 +67,12 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
                 content = content[:start] + new_tag + content[end:]
 
             # Create assembly if requested
-            if create_assembly and len(object_ids) > 1:
+            # [FIX] When colors are enabled, do NOT create assembly because:
+            # 1. Assembly objects have no mesh/triangles, only components
+            # 2. Color info (pid/p1) is on component triangles
+            # 3. Slicers may not correctly propagate colors through assembly hierarchy
+            # 4. Direct build items work better with color injection
+            if create_assembly and len(object_ids) > 1 and not enable_colors:
                 # Find the maximum object ID
                 max_id = max(int(oid) for oid in object_ids)
                 assembly_id = max_id + 1
@@ -96,6 +101,11 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
                     new_build = f'<build>\n    <item objectid="{assembly_id}" />\n  </build>'
                     content = content[:build_match.start()] + new_build + content[build_match.end():]
                     print(f"[DEBUG] Updated build section to reference assembly")
+            elif enable_colors and len(object_ids) > 1:
+                # When colors are enabled, keep individual objects in build section
+                # This ensures slicers can correctly process color information
+                print(f"[DEBUG] Colors enabled: Skipping assembly creation to preserve color information")
+                print(f"[DEBUG] Build section will reference {len(object_ids)} individual objects")
 
             files_data[model_file] = content.encode('utf-8')
 

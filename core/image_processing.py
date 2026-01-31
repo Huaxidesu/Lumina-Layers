@@ -1,6 +1,7 @@
 """
 Lumina Studio - Image Processing Core
-Image processing core module - Handles image loading, preprocessing, color quantization and matching
+
+Handles image loading, preprocessing, color quantization and matching.
 """
 
 import numpy as np
@@ -13,63 +14,116 @@ from config import PrinterConfig
 
 class LuminaImageProcessor:
     """
-    Image processor class
-    Handles LUT loading, image processing, and color matching
+    Image processor class.
+    
+    Handles LUT loading, image processing, and color matching.
     """
     
     def __init__(self, lut_path, color_mode):
         """
-        Initialize image processor
+        Initialize image processor.
         
         Args:
             lut_path: LUT file path (.npy)
-            color_mode: Color mode string (CMYW/RYBW)
+            color_mode: Color mode string (CMYW/RYBW/6-Color)
         """
         self.color_mode = color_mode
         self.lut_rgb = None
         self.ref_stacks = None
         self.kdtree = None
         
-        # Load and validate LUT
         self._load_lut(lut_path)
     
     def _load_lut(self, lut_path):
-        """Load and validate LUT file"""
+        """
+        Load and validate LUT file (Supports 4-Color and 6-Color).
+        
+        Automatically detects LUT type based on size:
+        - 1024 colors: 4-Color Standard (CMYW/RYBW)
+        - 1296 colors: 6-Color Smart 1296
+        """
         try:
             lut_grid = np.load(lut_path)
             measured_colors = lut_grid.reshape(-1, 3)
+            total_colors = measured_colors.shape[0]
         except Exception as e:
             raise ValueError(f"❌ LUT file corrupted: {e}")
         
-        valid_rgb, valid_stacks = [], []
-        base_blue = np.array([30, 100, 200])
-        dropped = 0
+        valid_rgb = []
+        valid_stacks = []
         
-        # Filter outliers
-        for i in range(1024):
-            digits = []
-            temp = i
-            for _ in range(5):
-                digits.append(temp % 4)
-                temp //= 4
-            stack = digits[::-1]
-            
-            real_rgb = measured_colors[i]
-            dist = np.linalg.norm(real_rgb - base_blue)
-            
-            # Filter out anomalies: close to blue but doesn't contain blue
-            if dist < 60 and 3 not in stack:
-                dropped += 1
-                continue
-            
-            valid_rgb.append(real_rgb)
-            valid_stacks.append(stack)
+        print(f"[IMAGE_PROCESSOR] Loading LUT with {total_colors} points...")
         
-        self.lut_rgb = np.array(valid_rgb)
-        self.ref_stacks = np.array(valid_stacks)
+        # Branch 1: 6-Color Smart 1296
+        if "6-Color" in self.color_mode or total_colors == 1296:
+            print("[IMAGE_PROCESSOR] Detected 6-Color Smart 1296 mode")
+            
+            from core.calibration import get_top_1296_colors
+            
+            # Retrieve 1296 intelligent stacking order (must match calibration.py logic)
+            # Note: generate_smart_board uses padding to fill 38x38,
+            # but extractor extracts the border-removed 36x36 (1296 cells).
+            # So we directly get the original stacking data here.
+            
+            smart_stacks = get_top_1296_colors()
+            
+            # Reverse stacking order to make it (Top -> Bottom)
+            # Original smart_stacks is [Bottom, ..., Top] (simulation data order)
+            # But Converter's Face Down logic prints Z=0 as Index=0
+            # So we need to reverse to [Top, ..., Bottom], making Z=0 the viewing surface
+            smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
+            print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
+            
+            if len(smart_stacks) != total_colors:
+                print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
+                min_len = min(len(smart_stacks), total_colors)
+                smart_stacks = smart_stacks[:min_len]
+                measured_colors = measured_colors[:min_len]
+            
+            # No "Base Blue" filtering in 6-color mode (colors too complex)
+            self.lut_rgb = measured_colors
+            self.ref_stacks = np.array(smart_stacks)
+            
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (6-Color mode)")
+        
+        # Branch 2: 4-Color Standard (1024)
+        else:
+            print("[IMAGE_PROCESSOR] Detected 4-Color Standard mode")
+            
+            # Keep original outlier filtering logic (Blue Check)
+            base_blue = np.array([30, 100, 200])
+            dropped = 0
+            
+            for i in range(1024):
+                if i >= total_colors:
+                    break
+                
+                # Rebuild 4-base stacking (0..1023)
+                digits = []
+                temp = i
+                for _ in range(5):
+                    digits.append(temp % 4)
+                    temp //= 4
+                stack = digits[::-1]
+                
+                real_rgb = measured_colors[i]
+                
+                # Filter outliers: close to blue but doesn't contain blue
+                dist = np.linalg.norm(real_rgb - base_blue)
+                if dist < 60 and 3 not in stack:  # 3 is Blue in RYBW/CMYW
+                    dropped += 1
+                    continue
+                
+                valid_rgb.append(real_rgb)
+                valid_stacks.append(stack)
+            
+            self.lut_rgb = np.array(valid_rgb)
+            self.ref_stacks = np.array(valid_stacks)
+            
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (filtered {dropped} outliers)")
+        
+        # Build KD-Tree
         self.kdtree = KDTree(self.lut_rgb)
-        
-        print(f"✅ LUT loaded (filtered {dropped} outliers)")
     
     def process_image(self, image_path, target_width_mm, modeling_mode,
                      quantize_colors, auto_bg, bg_tol,
