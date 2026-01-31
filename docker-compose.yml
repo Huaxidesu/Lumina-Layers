@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  lumina-layers:
+    build: .
+    container_name: lumina-layers
+    ports:
+      - "7860:7860"
+      - "8501:8501"
+    volumes:
+      - .:/app
+    environment:
+      - GRADIO_SERVER_NAME=0.0.0.0
+    restart: unless-stopped
