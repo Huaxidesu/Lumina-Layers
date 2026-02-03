@@ -30,6 +30,8 @@ FILAMENTS = {
     3: {"name": "Green",        "rgb": [0, 174, 66],    "td": 2.0},   # 对应色卡"拓竹绿" #00AE42, TD=2.0
     4: {"name": "Yellow",       "rgb": [244, 238, 42],  "td": 6.0},   # 对应色卡"黄色" #F4EE2A, TD=6.0
     5: {"name": "Black",        "rgb": [0, 0, 0],       "td": 0.6},   # 对应色卡"黑色" #000000, TD=0.6
+    6: {"name": "Red",          "rgb": [255, 0, 0],     "td": 4.0},   # 示例：红色，请修改为实际TD
+    7: {"name": "Blue",         "rgb": [0, 0, 255],     "td": 4.0},   # 示例：蓝色，请修改为实际TD
 }
 
 # 色差阈值 (Delta E)
@@ -78,15 +80,17 @@ def rgb_to_lab(rgb):
     return convert_color(rgb_obj, LabColor)
 
 def main():
-    print(f"🔄 开始模拟 6色 {LAYERS}层 全排列 ({6**LAYERS} 种组合)...")
+# 这里的 8 对应 FILAMENTS 中的颜色数量
+    COLOR_COUNT = 8 
+    
+    print(f"🔄 开始模拟 {COLOR_COUNT}色 {LAYERS}层 全排列 ({COLOR_COUNT**LAYERS} 种组合)...")
     print(f"📏 色差阈值 (Delta E): {THRESHOLD_DELTA_E}")
-    print(f"🎨 使用拓竹准确色值 (青:{FILAMENTS[1]['rgb']}, 品:{FILAMENTS[2]['rgb']}...)")
     
     # 1. 生成并计算所有组合的颜色
     all_combinations = []
     
-    # 生成 6^5 全排列
-    permutations = itertools.product(range(6), repeat=LAYERS)
+    # 生成 8^5 全排列 (32768 种组合)
+    permutations = itertools.product(range(COLOR_COUNT), repeat=LAYERS)
     
     for stack in permutations:
         # 这里的 stack 是从底层到顶层
@@ -124,11 +128,12 @@ def main():
         if i % 1000 == 0:
             print(f"   处理进度: {i}/{total} | 当前保留: {len(unique_colors)}")
 
+    total_combinations = COLOR_COUNT ** LAYERS  # 8^5 = 32768
+
     print("-" * 30)
-    print(f"🎉 最终结果: 在 7776 种组合中")
+    print(f"🎉 最终结果: 在 {total_combinations} 种组合中")
     print(f"💎 肉眼可见的独立颜色数量: {len(unique_colors)}")
-    print(f"📉 冗余率: {(1 - len(unique_colors)/7776)*100:.1f}%")
-    print("-" * 30)
+    print(f"📉 冗余率: {(1 - len(unique_colors)/total_combinations)*100:.1f}%")
     
     # 3. 打印一些统计建议
     if len(unique_colors) <= 1024:

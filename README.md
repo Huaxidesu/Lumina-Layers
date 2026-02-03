@@ -8,11 +8,7 @@ Physics-Based Multi-Material FDM Color System
 
 ## Project Status
 
-<<<<<<< Updated upstream
-**Current Version**: v1.4.2  
-=======
 **Current Version**: v1.5.0  
->>>>>>> Stashed changes
 **License**: CC BY-NC-SA 4.0 (with Commercial Exemption)  
 **Nature**: Non-profit independent implementation, open-source community project
 
@@ -103,11 +99,7 @@ You **do NOT need to ask for permission**. You automatically have the right to:
 
 ---
 
-<<<<<<< Updated upstream
-Lumina Studio v1.4.2 integrates three major modules into a unified interface:
-=======
 Lumina Studio v1.5.0 integrates three major modules into a unified interface:
->>>>>>> Stashed changes
 
 ### 📐 Module 1: Calibration Generator
 
@@ -145,19 +137,6 @@ Converts images into printable 3D models using calibrated data.
 
 ---
 
-<<<<<<< Updated upstream
-## What's New in v1.4.2 🚀
-
-### Bug Fixes and Improvements
-
-- Fixed some known issues
-- Improved performance and stability
-- Minor code optimizations
-
----
-
-## Previous Updates (v1.4.1)
-=======
 ## What's New in v1.5.0 🚀
 
 ### Code Standardization
@@ -169,7 +148,6 @@ Converts images into printable 3D models using calibrated data.
 ---
 
 ## What's New in v1.4.1 🚀
->>>>>>> Stashed changes
 
 ### Modeling Mode Consolidation
 

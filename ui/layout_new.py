@@ -39,6 +39,47 @@ from .callbacks import (
 )
 
 
+# ========== Mode Mapping Helper ==========
+
+def map_modeling_mode(mode_display_text):
+    """
+    Map UI display text to internal mode string.
+    
+    Args:
+        mode_display_text: Display text from UI (e.g., "🎨 高保真（平滑）")
+        
+    Returns:
+        Internal mode string ("high-fidelity", "pixel", or "vector_native")
+    """
+    mode_lower = mode_display_text.lower()
+    
+    if "vector" in mode_lower or "矢量" in mode_lower:
+        return "vector_native"
+    elif "pixel" in mode_lower or "像素" in mode_lower:
+        return "pixel"
+    else:  # Default to high-fidelity
+        return "high-fidelity"
+
+
+def generate_final_model_with_mapping(image_path, lut_path, target_width_mm, spacer_thick,
+                                      structure_mode, auto_bg, bg_tol, color_mode,
+                                      add_loop, loop_width, loop_length, loop_hole, loop_pos,
+                                      modeling_mode_display, quantize_colors):
+    """
+    Wrapper that maps UI mode display text to internal mode string.
+    """
+    # Map display text to internal mode
+    modeling_mode = map_modeling_mode(modeling_mode_display)
+    
+    # Call actual conversion function
+    return generate_final_model(
+        image_path, lut_path, target_width_mm, spacer_thick,
+        structure_mode, auto_bg, bg_tol, color_mode,
+        add_loop, loop_width, loop_length, loop_hole, loop_pos,
+        modeling_mode, quantize_colors
+    )
+
+
 def create_app():
     """Create Gradio application interface (with language switching support)"""
     with gr.Blocks(title="Lumina Studio") as app:
@@ -259,7 +300,8 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                     info=I18n.get('conv_modeling_mode_info', lang),
                     choices=[
                         I18n.get('conv_modeling_mode_hifi', lang),
-                        I18n.get('conv_modeling_mode_pixel', lang)
+                        I18n.get('conv_modeling_mode_pixel', lang),
+                        I18n.get('conv_modeling_mode_vector', lang)  # NEW
                     ]
                 ))
         elif key.startswith('slider_'):
@@ -411,7 +453,8 @@ def create_converter_tab_content(lang: str) -> dict:
             components['radio_conv_modeling_mode'] = gr.Radio(
                 choices=[
                     I18n.get('conv_modeling_mode_hifi', lang),
-                    I18n.get('conv_modeling_mode_pixel', lang)
+                    I18n.get('conv_modeling_mode_pixel', lang),
+                    I18n.get('conv_modeling_mode_vector', lang)  # NEW: Vector Native mode
                 ],
                 value=I18n.get('conv_modeling_mode_hifi', lang),
                 label=I18n.get('conv_modeling_mode', lang),
@@ -620,7 +663,7 @@ def create_converter_tab_content(lang: str) -> dict:
     
     # Generate final model
     components['btn_conv_generate_btn'].click(
-            generate_final_model,
+            generate_final_model_with_mapping,  # Use wrapper with mode mapping
             inputs=[
                 components['image_conv_image_label'],
                 conv_lut_path,

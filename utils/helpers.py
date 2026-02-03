@@ -67,12 +67,9 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
                 content = content[:start] + new_tag + content[end:]
 
             # Create assembly if requested
-            # [FIX] When colors are enabled, do NOT create assembly because:
-            # 1. Assembly objects have no mesh/triangles, only components
-            # 2. Color info (pid/p1) is on component triangles
-            # 3. Slicers may not correctly propagate colors through assembly hierarchy
-            # 4. Direct build items work better with color injection
-            if create_assembly and len(object_ids) > 1 and not enable_colors:
+            # Note: For vector mode with many objects, we skip assembly creation
+            # to keep the 3MF structure simple and compatible with all slicers
+            if create_assembly and len(object_ids) > 1:
                 # Find the maximum object ID
                 max_id = max(int(oid) for oid in object_ids)
                 assembly_id = max_id + 1
@@ -101,11 +98,6 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
                     new_build = f'<build>\n    <item objectid="{assembly_id}" />\n  </build>'
                     content = content[:build_match.start()] + new_build + content[build_match.end():]
                     print(f"[DEBUG] Updated build section to reference assembly")
-            elif enable_colors and len(object_ids) > 1:
-                # When colors are enabled, keep individual objects in build section
-                # This ensures slicers can correctly process color information
-                print(f"[DEBUG] Colors enabled: Skipping assembly creation to preserve color information")
-                print(f"[DEBUG] Build section will reference {len(object_ids)} individual objects")
 
             files_data[model_file] = content.encode('utf-8')
 

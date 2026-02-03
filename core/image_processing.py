@@ -11,6 +11,15 @@ from scipy.spatial import KDTree
 
 from config import PrinterConfig
 
+# SVG support (optional dependency)
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPM
+    HAS_SVG = True
+except ImportError:
+    HAS_SVG = False
+    print("⚠️ [SVG] svglib/reportlab not installed. SVG support disabled.")
+
 
 class LuminaImageProcessor:
     """
@@ -33,6 +42,57 @@ class LuminaImageProcessor:
         self.kdtree = None
         
         self._load_lut(lut_path)
+    
+    def _load_svg(self, svg_path, target_width_mm):
+        """
+        [New] Render SVG to ultra-high-resolution numpy array
+        [Updated] Increased resolution from 10 px/mm to 20 px/mm for smoother curves
+        
+        Target resolution: 20 pixels/mm (Ultra-High-Fidelity)
+        - Standard High-Fidelity: 10 px/mm (0.1mm precision)
+        - Ultra High-Fidelity: 20 px/mm (0.05mm precision)
+        
+        This super-sampling approach eliminates jagged edges on curves
+        without needing blur filters, preserving vector crispness.
+        
+        Args:
+            svg_path: Path to SVG file
+            target_width_mm: Target width in millimeters
+        
+        Returns:
+            numpy.ndarray: RGBA image array
+        """
+        if not HAS_SVG:
+            raise ImportError("Please install 'svglib' and 'reportlab' to process SVG files.")
+        
+        print(f"[SVG] Rasterizing vector file: {svg_path}")
+        
+        # 1. Read SVG
+        drawing = svg2rlg(svg_path)
+        
+        # 2. Calculate scale for Ultra-High-Fidelity (20 px/mm)
+        # [UPGRADED] Doubled resolution for smoother curves
+        # Old: 10.0 px/mm (0.1mm) - visible jaggies on curves
+        # New: 20.0 px/mm (0.05mm) - ultra-smooth, exceeds most FDM printer limits
+        pixels_per_mm = 20.0
+        target_width_px = int(target_width_mm * pixels_per_mm)
+        scale_factor = target_width_px / drawing.width
+        
+        print(f"[SVG] Ultra-High-Fidelity mode: {pixels_per_mm} px/mm (0.05mm precision)")
+        
+        # 3. Scale drawing
+        drawing.scale(scale_factor, scale_factor)
+        drawing.width = int(drawing.width * scale_factor)
+        drawing.height = int(drawing.height * scale_factor)
+        
+        # 4. Render to PIL Image
+        # use bg=0xffffff to handle transparency correctly if needed, or maintain alpha
+        pil_img = renderPM.drawToPIL(drawing, bg=None, configPIL={'transparent': True})
+        
+        print(f"[SVG] Rendered resolution: {drawing.width}x{drawing.height} px")
+        
+        # 5. Convert to RGBA numpy array
+        return np.array(pil_img.convert('RGBA'))
     
     def _load_lut(self, lut_path):
         """
@@ -169,42 +229,70 @@ class LuminaImageProcessor:
         print(f"[IMAGE_PROCESSOR] Mode: {mode_name}")
         print(f"[IMAGE_PROCESSOR] Filter settings: blur_kernel={blur_kernel}, smooth_sigma={smooth_sigma}")
         
-        # Load image
-        img = Image.open(image_path).convert('RGBA')
+        # ========== Image Loading Logic Branch ==========
+        is_svg = image_path.lower().endswith('.svg')
         
-        # DEBUG: Check original image properties
-        print(f"[IMAGE_PROCESSOR] Original image: {image_path}")
-        print(f"[IMAGE_PROCESSOR] Image mode: {Image.open(image_path).mode}")
-        print(f"[IMAGE_PROCESSOR] Image size: {Image.open(image_path).size}")
-        
-        # Check if image has transparency
-        original_img = Image.open(image_path)
-        has_alpha = original_img.mode in ('RGBA', 'LA') or (original_img.mode == 'P' and 'transparency' in original_img.info)
-        print(f"[IMAGE_PROCESSOR] Has alpha channel: {has_alpha}")
-        
-        if has_alpha:
-            # Check alpha channel statistics
-            if original_img.mode != 'RGBA':
-                original_img = original_img.convert('RGBA')
-            alpha_data = np.array(original_img)[:, :, 3]
-            print(f"[IMAGE_PROCESSOR] Alpha stats: min={alpha_data.min()}, max={alpha_data.max()}, mean={alpha_data.mean():.1f}")
-            print(f"[IMAGE_PROCESSOR] Transparent pixels (alpha<10): {np.sum(alpha_data < 10)}")
-        
-        # Calculate target resolution
-        if use_high_fidelity:
-            # High-precision mode: 10 pixels/mm
-            PIXELS_PER_MM = 10
-            target_w = int(target_width_mm * PIXELS_PER_MM)
-            pixel_to_mm_scale = 1.0 / PIXELS_PER_MM  # 0.1 mm per pixel
-            print(f"[IMAGE_PROCESSOR] High-res mode: {PIXELS_PER_MM} px/mm")
+        if is_svg:
+            print("[IMAGE_PROCESSOR] SVG detected - Engaging Ultra-High-Fidelity Vector Mode")
+            img_arr = self._load_svg(image_path, target_width_mm)
+            # SVG reset to PIL object to reuse subsequent logic (e.g., get dimensions)
+            img = Image.fromarray(img_arr)
+            
+            # [CRITICAL] SVG is also a type of High-Fidelity, but it doesn't need denoising
+            # Force override filter parameters, because vector graphics have no noise, no need to blur
+            # 
+            # [SUPER-SAMPLING STRATEGY]
+            # We render at 20 px/mm (2x standard), which physically eliminates jaggies
+            # through super-sampling. This is superior to blur-based anti-aliasing
+            # because it preserves sharp edges while making curves smooth.
+            blur_kernel = 0
+            smooth_sigma = 0
+            print("[IMAGE_PROCESSOR] SVG Mode: Filters disabled (Vector source is clean)")
+            print("[IMAGE_PROCESSOR] Super-sampling at 20 px/mm eliminates jagged edges naturally")
+            
+            # Recalculate target_w/h (based on rendered dimensions)
+            target_w, target_h = img.size
+            pixel_to_mm_scale = 0.05  # 20 px/mm (1/20) - Ultra-High-Fidelity
         else:
-            # Pixel mode: Based on nozzle width
-            target_w = int(target_width_mm / PrinterConfig.NOZZLE_WIDTH)
-            pixel_to_mm_scale = PrinterConfig.NOZZLE_WIDTH
-            print(f"[IMAGE_PROCESSOR] Pixel mode: {1.0/pixel_to_mm_scale:.2f} px/mm")
+            # [Original Logic] Bitmap loading
+            # Load image
+            img = Image.open(image_path).convert('RGBA')
+            
+            # DEBUG: Check original image properties
+            print(f"[IMAGE_PROCESSOR] Original image: {image_path}")
+            print(f"[IMAGE_PROCESSOR] Image mode: {Image.open(image_path).mode}")
+            print(f"[IMAGE_PROCESSOR] Image size: {Image.open(image_path).size}")
+            
+            # Check if image has transparency
+            original_img = Image.open(image_path)
+            has_alpha = original_img.mode in ('RGBA', 'LA') or (original_img.mode == 'P' and 'transparency' in original_img.info)
+            print(f"[IMAGE_PROCESSOR] Has alpha channel: {has_alpha}")
+            
+            if has_alpha:
+                # Check alpha channel statistics
+                if original_img.mode != 'RGBA':
+                    original_img = original_img.convert('RGBA')
+                alpha_data = np.array(original_img)[:, :, 3]
+                print(f"[IMAGE_PROCESSOR] Alpha stats: min={alpha_data.min()}, max={alpha_data.max()}, mean={alpha_data.mean():.1f}")
+                print(f"[IMAGE_PROCESSOR] Transparent pixels (alpha<10): {np.sum(alpha_data < 10)}")
+            
+            # Calculate target resolution
+            if use_high_fidelity:
+                # High-precision mode: 10 pixels/mm
+                PIXELS_PER_MM = 10
+                target_w = int(target_width_mm * PIXELS_PER_MM)
+                pixel_to_mm_scale = 1.0 / PIXELS_PER_MM  # 0.1 mm per pixel
+                print(f"[IMAGE_PROCESSOR] High-res mode: {PIXELS_PER_MM} px/mm")
+            else:
+                # Pixel mode: Based on nozzle width
+                target_w = int(target_width_mm / PrinterConfig.NOZZLE_WIDTH)
+                pixel_to_mm_scale = PrinterConfig.NOZZLE_WIDTH
+                print(f"[IMAGE_PROCESSOR] Pixel mode: {1.0/pixel_to_mm_scale:.2f} px/mm")
+            
+            target_h = int(target_w * img.height / img.width)
+            print(f"[IMAGE_PROCESSOR] Target: {target_w}×{target_h}px ({target_w*pixel_to_mm_scale:.1f}×{target_h*pixel_to_mm_scale:.1f}mm)")
         
-        target_h = int(target_w * img.height / img.width)
-        print(f"[IMAGE_PROCESSOR] Target: {target_w}×{target_h}px ({target_w*pixel_to_mm_scale:.1f}×{target_h*pixel_to_mm_scale:.1f}mm)")
+        # ========== End of Image Loading Logic Branch ==========
         
         # ========== CRITICAL FIX: Use NEAREST for both modes ==========
         # REASON: LANCZOS anti-aliasing creates light transition pixels at edges.
@@ -308,16 +396,10 @@ class LuminaImageProcessor:
         else:
             print(f"[IMAGE_PROCESSOR] Median blur disabled (kernel=0)")
         
-        # Step 3: Optional sharpening (enhance contours)
-        # Use gentle sharpening kernel to enhance details
-        sharpen_kernel = np.array([
-            [0, -0.5, 0],
-            [-0.5, 3, -0.5],
-            [0, -0.5, 0]
-        ])
-        print(f"[IMAGE_PROCESSOR] Applying subtle sharpening...")
-        rgb_sharpened = cv2.filter2D(rgb_processed, -1, sharpen_kernel)
-        rgb_sharpened = np.clip(rgb_sharpened, 0, 255).astype(np.uint8)
+        # Step 3: Skip sharpening to prevent noise amplification
+        # Sharpening creates high-contrast noise in flat color areas
+        print(f"[IMAGE_PROCESSOR] Skipping sharpening to reduce noise...")
+        rgb_sharpened = rgb_processed
         
         # Step 4: K-Means quantization
         print(f"[IMAGE_PROCESSOR] K-Means quantization to {quantize_colors} colors...")
@@ -333,6 +415,11 @@ class LuminaImageProcessor:
         centers = centers.astype(np.uint8)
         quantized_pixels = centers[labels.flatten()]
         quantized_image = quantized_pixels.reshape(h, w, 3)
+        
+        # [CRITICAL FIX] Post-Quantization Cleanup
+        # Removes isolated "salt-and-pepper" noise pixels that survive quantization
+        print(f"[IMAGE_PROCESSOR] Applying post-quantization cleanup (Denoising)...")
+        quantized_image = cv2.medianBlur(quantized_image, 3)  # Kernel size 3 is optimal for detail preservation
         
         print(f"[IMAGE_PROCESSOR] Quantization complete!")
         

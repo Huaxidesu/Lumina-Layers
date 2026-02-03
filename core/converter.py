@@ -18,6 +18,14 @@ from core.image_processing import LuminaImageProcessor
 from core.mesh_generators import get_mesher
 from core.geometry_utils import create_keychain_loop
 
+# Try to import SVG rendering libraries
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPM
+    HAS_SVG_LIB = True
+except ImportError:
+    HAS_SVG_LIB = False
+
 
 # ========== Debug Helper Functions ==========
 
@@ -137,6 +145,93 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     print(f"[CONVERTER] Mode: {modeling_mode}, Quantize: {quantize_colors}")
     print(f"[CONVERTER] Filters: blur_kernel={blur_kernel}, smooth_sigma={smooth_sigma}")
     print(f"[CONVERTER] LUT: {actual_lut_path}")
+    
+    # ========== [UPDATED] Native Vector Mode Detection ==========
+    # Check if user selected vector mode AND file is SVG
+    if modeling_mode == "vector_native" and image_path.lower().endswith('.svg'):
+        print("[CONVERTER] 🎨 Using Native Vector Engine (Shapely/Clipper)...")
+        
+        try:
+            from core.vector_engine import VectorProcessor
+            
+            # 1. Execute Conversion
+            vec_processor = VectorProcessor(actual_lut_path, color_mode)
+            
+            # Convert SVG to 3D scene
+            scene = vec_processor.svg_to_mesh(
+                svg_path=image_path,
+                target_width_mm=target_width_mm,
+                thickness_mm=spacer_thick,
+                structure_mode=structure_mode
+            )
+            
+            # 2. Export 3MF
+            base_name = os.path.splitext(os.path.basename(image_path))[0]
+            out_path = os.path.join(OUTPUT_DIR, f"{base_name}_Lumina_Vector.3mf")
+            scene.export(out_path)
+            
+            # [CRITICAL FIX] Disable safe_fix_3mf_names for Vector Mode
+            # Vector engine assigns names internally. External fixing causes index shifts
+            # if layers are missing (e.g., skipping Green causes Yellow to be named Green).
+            # safe_fix_3mf_names(out_path, color_conf['slots'])  # <-- DISABLED
+            
+            print(f"[CONVERTER] ✅ Vector 3MF exported: {out_path}")
+            
+            # 4. Generate GLB Preview
+            glb_path = None
+            try:
+                glb_path = os.path.join(OUTPUT_DIR, f"{base_name}_Preview.glb")
+                scene.export(glb_path)
+                print(f"[CONVERTER] ✅ Preview GLB exported: {glb_path}")
+            except Exception as e:
+                print(f"[CONVERTER] Warning: Preview generation skipped: {e}")
+            
+            # 5. [FIX] Generate 2D Preview Image from SVG
+            preview_img = None
+            if HAS_SVG_LIB:
+                try:
+                    drawing = svg2rlg(image_path)
+                    # Render high-res preview
+                    scale = target_width_mm / drawing.width * 5  # 5px/mm preview
+                    drawing.scale(scale, scale)
+                    drawing.width *= scale
+                    drawing.height *= scale
+                    pil_img = renderPM.drawToPIL(drawing, bg=0xffffff, configPIL={'transparent': True})
+                    preview_img = np.array(pil_img)
+                    print("[CONVERTER] ✅ Generated 2D vector preview")
+                except Exception as e:
+                    print(f"[CONVERTER] Failed to render SVG preview: {e}")
+            else:
+                print("[CONVERTER] svglib not installed, skipping 2D preview")
+            
+            # Update stats
+            Stats.increment("conversions")
+            
+            # Return results
+            msg = f"✅ Vector conversion complete! Objects merged by material."
+            return out_path, glb_path, preview_img, msg
+            
+        except Exception as e:
+            error_msg = f"❌ Vector processing failed: {e}\n\n"
+            error_msg += "Suggestions:\n"
+            error_msg += "• Ensure SVG has filled paths (not just strokes)\n"
+            error_msg += "• Try opening in Inkscape and re-saving as 'Plain SVG'\n"
+            error_msg += "• Convert text to paths (Path → Object to Path)\n"
+            error_msg += "• Or switch to 'High-Fidelity' mode for rasterization"
+            
+            print(f"[CONVERTER] {error_msg}")
+            return None, None, None, error_msg
+    
+    # If vector mode selected but file is not SVG, show warning
+    if modeling_mode == "vector_native" and not image_path.lower().endswith('.svg'):
+        return None, None, None, (
+            "⚠️ Vector Native mode requires SVG files!\n\n"
+            "Your file is not an SVG. Please either:\n"
+            "• Upload an SVG file, or\n"
+            "• Switch to 'High-Fidelity' or 'Pixel Art' mode"
+        )
+    
+    # ========== [EXISTING] Raster-based Processing ==========
     
     color_conf = ColorSystem.get(color_mode)
     slot_names = color_conf['slots']

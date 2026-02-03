@@ -120,8 +120,16 @@ class I18N:
         'conv_input': {'zh': '#### 📁 输入文件', 'en': '#### 📁 Input Files'},
         'conv_lut': {'zh': '1. 校准数据 (.npy)', 'en': '1. Calibration Data (.npy)'},
         'conv_image': {'zh': '2. 输入图像', 'en': '2. Input Image'},
+        'conv_image_label': {'zh': '2. 输入图像 (支持 JPG, PNG, SVG)', 'en': '2. Input Image (Supports JPG, PNG, SVG)'},
         'conv_params': {'zh': '#### ⚙️ 参数设置', 'en': '#### ⚙️ Parameters'},
         'conv_color_mode': {'zh': '🎨 色彩模式（需与校准板一致）', 'en': '🎨 Color Mode (must match calibration)'},
+        'conv_modeling_mode': {'zh': '建模模式', 'en': 'Modeling Mode'},
+        'conv_modeling_mode_hifi': {'zh': '🎨 高保真（平滑）', 'en': '🎨 High-Fidelity (Smooth)'},
+        'conv_modeling_mode_pixel': {'zh': '🧱 像素艺术（方块）', 'en': '🧱 Pixel Art (Blocky)'},
+        'conv_modeling_mode_vector': {'zh': '📐 矢量原生（仅SVG）', 'en': '📐 Vector Native (SVG Only)'},
+        'conv_modeling_mode_info': {'zh': '高保真：平滑曲线 | 像素艺术：方块风格 | 矢量原生：SVG直接转换', 'en': 'High-Fidelity: Smooth curves | Pixel Art: Blocky style | Vector Native: Direct SVG conversion'},
+        'conv_quantize_colors': {'zh': '色彩细节', 'en': 'Color Detail'},
+        'conv_quantize_info': {'zh': '8-32色：极简 | 64-128色：平衡 | 128-256色：照片级', 'en': '8-32: Minimalist | 64-128: Balanced | 128-256: Photographic'},
         'conv_structure': {'zh': '结构类型', 'en': 'Structure Type'},
         'conv_double': {'zh': '双面 (钥匙扣)', 'en': 'Double-sided (Keychain)'},
         'conv_single': {'zh': '单面 (浮雕)', 'en': 'Single-sided (Relief)'},
@@ -223,3 +231,28 @@ LUT_FILE_PATH = os.path.join(OUTPUT_DIR, "lumina_lut.npy")
 # Converter constants
 PREVIEW_SCALE = 2
 PREVIEW_MARGIN = 30
+
+
+# ========== Vector Engine Configuration ==========
+
+class VectorConfig:
+    """Configuration for native vector engine."""
+    
+    # Curve approximation precision
+    DEFAULT_SAMPLING_MM: float = 0.05  # High quality (default)
+    MIN_SAMPLING_MM: float = 0.01      # Ultra-high quality
+    MAX_SAMPLING_MM: float = 0.20      # Low quality (faster)
+    
+    # Performance limits
+    MAX_POLYGONS: int = 10000          # Prevent memory issues
+    MAX_VERTICES_PER_POLY: int = 5000  # Prevent degenerate geometry
+    
+    # Boolean operation tolerance
+    BUFFER_TOLERANCE: float = 0.0      # Shapely buffer precision
+    
+    # Coordinate system
+    FLIP_Y_AXIS: bool = False          # SVG Y-down → 3D Y-up (disabled by default)
+    
+    # Parallel processing
+    ENABLE_PARALLEL: bool = False      # Parallel layer processing (experimental)
+    MAX_WORKERS: int = 5               # Thread pool size
