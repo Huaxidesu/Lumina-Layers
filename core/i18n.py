@@ -18,13 +18,8 @@ class I18n:
             'en': '✨ Lumina Studio'
         },
         'app_subtitle': {
-<<<<<<< Updated upstream
-            'zh': '多材料3D打印色彩系统 | v1.4.2',
-            'en': 'Multi-Material 3D Print Color System | v1.4.2'
-=======
             'zh': '多材料3D打印色彩系统 | v1.5.0',
             'en': 'Multi-Material 3D Print Color System | v1.5.0'
->>>>>>> Stashed changes
         },
         'lang_btn_zh': {
             'zh': '🌐 中文',
@@ -451,11 +446,7 @@ class I18n:
         
         # ==================== About Page Content ====================
         'about_content': {
-<<<<<<< Updated upstream
-            'zh': """## 🌟 Lumina Studio v1.4.2
-=======
             'zh': """## 🌟 Lumina Studio v1.5.0
->>>>>>> Stashed changes
 
 **多材料3D打印色彩系统**
 
@@ -489,15 +480,6 @@ class I18n:
 
 ---
 
-<<<<<<< Updated upstream
-### 📝 v1.4.2 更新日志
-
-#### 🐛 Bug修复
-- 修复了一些已知问题
-- 优化了性能和稳定性
-
-#### 📝 v1.4.1 更新日志
-=======
 ### 📝 v1.5.0 更新日志
 
 #### 🎨 代码标准化
@@ -508,7 +490,6 @@ class I18n:
 ---
 
 ### 📝 v1.4.1 更新日志
->>>>>>> Stashed changes
 
 #### 🚀 建模模式整合
 - **高保真模式取代矢量和版画模式**：统一为两种模式（高保真/像素艺术）
@@ -567,17 +548,10 @@ class I18n:
 
 <div style="text-align:center; color:#888; margin-top:20px;">
     Made with ❤️ by [MIN]<br>
-<<<<<<< Updated upstream
-    v1.4.2 | 2025
-</div>
-""",
-            'en': """## 🌟 Lumina Studio v1.4.2
-=======
     v1.5.0 | 2025
 </div>
 """,
             'en': """## 🌟 Lumina Studio v1.5.0
->>>>>>> Stashed changes
 
 **Multi-Material 3D Print Color System**
 
@@ -611,15 +585,6 @@ Accurate color reproduction for FDM printing
 
 ---
 
-<<<<<<< Updated upstream
-### 📝 v1.4.2 Changelog
-
-#### 🐛 Bug Fixes
-- Fixed some known issues
-- Improved performance and stability
-
-#### 📝 v1.4.1 Changelog
-=======
 ### 📝 v1.5.0 Changelog
 
 #### 🎨 Code Standardization
@@ -630,7 +595,6 @@ Accurate color reproduction for FDM printing
 ---
 
 ### 📝 v1.4.1 Changelog
->>>>>>> Stashed changes
 
 #### 🚀 Modeling Mode Consolidation
 - **High-Fidelity Mode Replaces Vector & Woodblock**: Unified into two modes (High-Fidelity/Pixel Art)
@@ -689,11 +653,7 @@ Special thanks to:
 
 <div style="text-align:center; color:#888; margin-top:20px;">
     Made with ❤️ by [MIN]<br>
-<<<<<<< Updated upstream
-    v1.4.2 | 2025
-=======
     v1.5.0 | 2025
->>>>>>> Stashed changes
 </div>
 """
         },
