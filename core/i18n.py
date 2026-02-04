@@ -18,8 +18,8 @@ class I18n:
             'en': '✨ Lumina Studio'
         },
         'app_subtitle': {
-            'zh': '多材料3D打印色彩系统 | v1.4.2',
-            'en': 'Multi-Material 3D Print Color System | v1.4.2'
+            'zh': '多材料3D打印色彩系统 | v1.5.2',
+            'en': 'Multi-Material 3D Print Color System | v1.5.2'
         },
         'lang_btn_zh': {
             'zh': '🌐 中文',
@@ -144,16 +144,20 @@ class I18n:
             'en': '🎨 Modeling Mode'
         },
         'conv_modeling_mode_info': {
-            'zh': '高保真：RLE无缝拼接，水密模型 | 像素艺术：经典方块美学',
-            'en': 'High-Fidelity: RLE seamless, watertight | Pixel Art: Classic blocky aesthetic'
+            'zh': '高保真：RLE无缝拼接，水密模型 | 像素艺术：经典方块美学 | SVG模式：矢量直接转换',
+            'en': 'High-Fidelity: RLE seamless, watertight | Pixel Art: Classic blocky aesthetic | SVG Mode: Direct vector conversion'
         },
         'conv_modeling_mode_hifi': {
-            'zh': '高保真 (细节优先)',
-            'en': 'High-Fidelity (Detail)'
+            'zh': '🎨 高保真',
+            'en': '🎨 High-Fidelity'
         },
         'conv_modeling_mode_pixel': {
-            'zh': '像素艺术 (方块风格)',
-            'en': 'Pixel Art (Blocky)'
+            'zh': '🧱 像素艺术',
+            'en': '🧱 Pixel Art'
+        },
+        'conv_modeling_mode_vector': {
+            'zh': '📐 SVG模式',
+            'en': '📐 SVG Mode'
         },
         'conv_quantize_colors': {
             'zh': '🎨 色彩细节',
@@ -182,6 +186,10 @@ class I18n:
         'conv_width': {
             'zh': '宽度 (mm)',
             'en': 'Width (mm)'
+        },
+        'conv_height': {
+            'zh': '高度 (mm)',
+            'en': 'Height (mm)'
         },
         'conv_thickness': {
             'zh': '背板 (mm)',
@@ -446,7 +454,7 @@ class I18n:
         
         # ==================== About Page Content ====================
         'about_content': {
-            'zh': """## 🌟 Lumina Studio v1.4.2
+            'zh': """## 🌟 Lumina Studio v1.5.2
 
 **多材料3D打印色彩系统**
 
@@ -480,13 +488,23 @@ class I18n:
 
 ---
 
-### 📝 v1.4.2 更新日志
+### 📝 v1.5.2 更新日志
 
-#### 🐛 Bug修复
-- 修复了一些已知问题
-- 优化了性能和稳定性
+#### 🔄 版本更新
+- 更新版本号至 v1.5.2
 
-#### 📝 v1.4.1 更新日志
+---
+
+### 📝 v1.5.0 更新日志
+
+#### 🎨 代码标准化
+- **注释统一为英文**：所有代码注释翻译为英文，提升国际化协作能力
+- **文档规范化**：统一使用 Google-style docstrings
+- **代码清理**：移除冗余注释，保留关键算法说明
+
+---
+
+### 📝 v1.4.1 更新日志
 
 #### 🚀 建模模式整合
 - **高保真模式取代矢量和版画模式**：统一为两种模式（高保真/像素艺术）
@@ -545,10 +563,10 @@ class I18n:
 
 <div style="text-align:center; color:#888; margin-top:20px;">
     Made with ❤️ by [MIN]<br>
-    v1.4.2 | 2025
+    v1.5.2 | 2025
 </div>
 """,
-            'en': """## 🌟 Lumina Studio v1.4.2
+            'en': """## 🌟 Lumina Studio v1.5.2
 
 **Multi-Material 3D Print Color System**
 
@@ -582,13 +600,23 @@ Accurate color reproduction for FDM printing
 
 ---
 
-### 📝 v1.4.2 Changelog
+### 📝 v1.5.2 Changelog
 
-#### 🐛 Bug Fixes
-- Fixed some known issues
-- Improved performance and stability
+#### 🔄 Version Update
+- Updated version number to v1.5.2
 
-#### 📝 v1.4.1 Changelog
+---
+
+### 📝 v1.5.0 Changelog
+
+#### 🎨 Code Standardization
+- **English-only Comments**: All code comments translated to English for better international collaboration
+- **Documentation Standards**: Unified Google-style docstrings across codebase
+- **Code Cleanup**: Removed redundant comments, kept essential algorithm explanations
+
+---
+
+### 📝 v1.4.1 Changelog
 
 #### 🚀 Modeling Mode Consolidation
 - **High-Fidelity Mode Replaces Vector & Woodblock**: Unified into two modes (High-Fidelity/Pixel Art)
@@ -647,7 +675,7 @@ Special thanks to:
 
 <div style="text-align:center; color:#888; margin-top:20px;">
     Made with ❤️ by [MIN]<br>
-    v1.4.2 | 2025
+    v1.5.2 | 2025
 </div>
 """
         },

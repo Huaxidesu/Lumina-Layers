@@ -55,10 +55,10 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
             # Process in reverse order to preserve positions (for name fixing)
             for idx, (start, end, old_tag, obj_id) in enumerate(reversed(obj_info)):
                 real_idx = len(obj_info) - 1 - idx
-                if real_idx >= len(slot_names):
-                    continue
-
-                color_name = slot_names[real_idx]
+                
+                # [FIX] Use modulo to cycle through slot_names if there are more objects
+                # This ensures all objects get a color name, even if there are multiple layers
+                color_name = slot_names[real_idx % len(slot_names)]
 
                 # Remove existing name attribute and add new one
                 new_tag = re.sub(r'\s+name="[^"]*"', '', old_tag)
@@ -67,6 +67,8 @@ def safe_fix_3mf_names(filepath: str, slot_names: List[str], create_assembly: bo
                 content = content[:start] + new_tag + content[end:]
 
             # Create assembly if requested
+            # Note: For vector mode with many objects, we skip assembly creation
+            # to keep the 3MF structure simple and compatible with all slicers
             if create_assembly and len(object_ids) > 1:
                 # Find the maximum object ID
                 max_id = max(int(oid) for oid in object_ids)

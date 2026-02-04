@@ -1,6 +1,7 @@
 """
 Lumina Studio - Image Processing Core
-Image processing core module - Handles image loading, preprocessing, color quantization and matching
+
+Handles image loading, preprocessing, color quantization and matching.
 """
 
 import numpy as np
@@ -10,66 +11,235 @@ from scipy.spatial import KDTree
 
 from config import PrinterConfig
 
+# SVG support (optional dependency)
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPM
+    HAS_SVG = True
+except ImportError:
+    HAS_SVG = False
+    print("⚠️ [SVG] svglib/reportlab not installed. SVG support disabled.")
+
 
 class LuminaImageProcessor:
     """
-    Image processor class
-    Handles LUT loading, image processing, and color matching
+    Image processor class.
+    
+    Handles LUT loading, image processing, and color matching.
     """
     
     def __init__(self, lut_path, color_mode):
         """
-        Initialize image processor
+        Initialize image processor.
         
         Args:
             lut_path: LUT file path (.npy)
-            color_mode: Color mode string (CMYW/RYBW)
+            color_mode: Color mode string (CMYW/RYBW/6-Color)
         """
         self.color_mode = color_mode
         self.lut_rgb = None
         self.ref_stacks = None
         self.kdtree = None
         
-        # Load and validate LUT
         self._load_lut(lut_path)
     
+    def _load_svg(self, svg_path, target_width_mm):
+        """
+        [Final Fix] Safe Padding + Dual-Pass Transparency Detection.
+        
+        Method: Render twice (White BG / Black BG).
+        - If pixel changes color -> It's background (Transparent) -> Remove it.
+        - If pixel stays same -> It's content (Opaque) -> Keep it 100% intact.
+        
+        This guarantees NO internal image damage.
+        """
+        if not HAS_SVG:
+            raise ImportError("Please install 'svglib' and 'reportlab'.")
+        
+        print(f"[SVG] Rasterizing: {svg_path}")
+        
+        # 1. 读取 SVG
+        drawing = svg2rlg(svg_path)
+        
+        # --- 步骤 A: 撑大画布 (确保内容不被切断) ---
+        x1, y1, x2, y2 = drawing.getBounds()
+        raw_w = x2 - x1
+        raw_h = y2 - y1
+        
+        # 添加 20% 安全边距
+        padding_x = raw_w * 0.2
+        padding_y = raw_h * 0.2
+        
+        drawing.translate(-x1 + padding_x, -y1 + padding_y)
+        drawing.width = raw_w + (padding_x * 2)
+        drawing.height = raw_h + (padding_y * 2)
+        
+        # 2. 缩放
+        pixels_per_mm = 20.0
+        target_width_px = int(target_width_mm * pixels_per_mm)
+        
+        if raw_w > 0:
+            scale_factor = target_width_px / raw_w
+        else:
+            scale_factor = 1.0
+        
+        drawing.scale(scale_factor, scale_factor)
+        drawing.width = int(drawing.width * scale_factor)
+        drawing.height = int(drawing.height * scale_factor)
+        
+        # ================== 【终极方案】双重渲染差分法 ==================
+        try:
+            # Pass 1: 白底渲染 (0xFFFFFF)
+            # 强制不使用透明通道，完全模拟打印在白纸上的效果
+            pil_white = renderPM.drawToPIL(drawing, bg=0xFFFFFF, configPIL={'transparent': False})
+            arr_white = np.array(pil_white.convert('RGB'))  # 丢弃 Alpha，只看颜色
+            
+            # Pass 2: 黑底渲染 (0x000000)
+            # 强制不使用透明通道，完全模拟打印在黑纸上的效果
+            pil_black = renderPM.drawToPIL(drawing, bg=0x000000, configPIL={'transparent': False})
+            arr_black = np.array(pil_black.convert('RGB'))
+            
+            # 计算差异 (Difference)
+            # diff = |白底图 - 黑底图|
+            # 如果像素是实心的，它挡住了背景，所以在白底和黑底上颜色一样 -> diff 为 0
+            # 如果像素是透明的，它透出了背景，所以在白底是白，黑底是黑 -> diff 很大
+            diff = np.abs(arr_white.astype(int) - arr_black.astype(int))
+            diff_sum = np.sum(diff, axis=2)
+            
+            # 生成完美的 Alpha 掩膜
+            # 只要差异小于 10，我们就认为它是实心内容 (容错处理抗锯齿边缘)
+            # 这样绝对不会误伤图像内部的任何颜色
+            alpha_mask = np.where(diff_sum < 10, 255, 0).astype(np.uint8)
+            
+            # 合成最终图像
+            # 我们取白底图的颜色 (因为它是实心的，取黑底图也一样)，然后把算出来的 alpha 贴上去
+            r, g, b = cv2.split(arr_white)
+            img_final = cv2.merge([r, g, b, alpha_mask])
+            
+            # 执行安全裁切
+            coords = cv2.findNonZero(alpha_mask)
+            
+            if coords is not None:
+                x, y, w_rect, h_rect = cv2.boundingRect(coords)
+                
+                if w_rect > 0 and h_rect > 0:
+                    print(f"[SVG] Dual-Pass Crop: {w_rect}x{h_rect} (Safe & Clean)")
+                    
+                    # 留 2 像素边缘
+                    pad = 2
+                    y_start = max(0, y - pad)
+                    y_end = min(img_final.shape[0], y + h_rect + pad)
+                    x_start = max(0, x - pad)
+                    x_end = min(img_final.shape[1], x + w_rect + pad)
+                    
+                    img_final = img_final[y_start:y_end, x_start:x_end]
+                else:
+                    print("[SVG] Warning: Content too small.")
+            else:
+                print("[SVG] Warning: Image appears fully transparent.")
+            
+            print(f"[SVG] Final resolution: {img_final.shape[1]}x{img_final.shape[0]} px")
+            return img_final
+            
+        except Exception as e:
+            print(f"[SVG] Dual-Pass failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 最后的保底：如果双重渲染失败，回退到普通渲染
+            pil_img = renderPM.drawToPIL(drawing, bg=None, configPIL={'transparent': True})
+            return np.array(pil_img.convert('RGBA'))
+    
     def _load_lut(self, lut_path):
-        """Load and validate LUT file"""
+        """
+        Load and validate LUT file (Supports 4-Color and 6-Color).
+        
+        Automatically detects LUT type based on size:
+        - 1024 colors: 4-Color Standard (CMYW/RYBW)
+        - 1296 colors: 6-Color Smart 1296
+        """
         try:
             lut_grid = np.load(lut_path)
             measured_colors = lut_grid.reshape(-1, 3)
+            total_colors = measured_colors.shape[0]
         except Exception as e:
             raise ValueError(f"❌ LUT file corrupted: {e}")
         
-        valid_rgb, valid_stacks = [], []
-        base_blue = np.array([30, 100, 200])
-        dropped = 0
+        valid_rgb = []
+        valid_stacks = []
         
-        # Filter outliers
-        for i in range(1024):
-            digits = []
-            temp = i
-            for _ in range(5):
-                digits.append(temp % 4)
-                temp //= 4
-            stack = digits[::-1]
-            
-            real_rgb = measured_colors[i]
-            dist = np.linalg.norm(real_rgb - base_blue)
-            
-            # Filter out anomalies: close to blue but doesn't contain blue
-            if dist < 60 and 3 not in stack:
-                dropped += 1
-                continue
-            
-            valid_rgb.append(real_rgb)
-            valid_stacks.append(stack)
+        print(f"[IMAGE_PROCESSOR] Loading LUT with {total_colors} points...")
         
-        self.lut_rgb = np.array(valid_rgb)
-        self.ref_stacks = np.array(valid_stacks)
+        # Branch 1: 6-Color Smart 1296
+        if "6-Color" in self.color_mode or total_colors == 1296:
+            print("[IMAGE_PROCESSOR] Detected 6-Color Smart 1296 mode")
+            
+            from core.calibration import get_top_1296_colors
+            
+            # Retrieve 1296 intelligent stacking order (must match calibration.py logic)
+            # Note: generate_smart_board uses padding to fill 38x38,
+            # but extractor extracts the border-removed 36x36 (1296 cells).
+            # So we directly get the original stacking data here.
+            
+            smart_stacks = get_top_1296_colors()
+            
+            # Reverse stacking order to make it (Top -> Bottom)
+            # Original smart_stacks is [Bottom, ..., Top] (simulation data order)
+            # But Converter's Face Down logic prints Z=0 as Index=0
+            # So we need to reverse to [Top, ..., Bottom], making Z=0 the viewing surface
+            smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
+            print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
+            
+            if len(smart_stacks) != total_colors:
+                print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
+                min_len = min(len(smart_stacks), total_colors)
+                smart_stacks = smart_stacks[:min_len]
+                measured_colors = measured_colors[:min_len]
+            
+            # No "Base Blue" filtering in 6-color mode (colors too complex)
+            self.lut_rgb = measured_colors
+            self.ref_stacks = np.array(smart_stacks)
+            
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (6-Color mode)")
+        
+        # Branch 2: 4-Color Standard (1024)
+        else:
+            print("[IMAGE_PROCESSOR] Detected 4-Color Standard mode")
+            
+            # Keep original outlier filtering logic (Blue Check)
+            base_blue = np.array([30, 100, 200])
+            dropped = 0
+            
+            for i in range(1024):
+                if i >= total_colors:
+                    break
+                
+                # Rebuild 4-base stacking (0..1023)
+                digits = []
+                temp = i
+                for _ in range(5):
+                    digits.append(temp % 4)
+                    temp //= 4
+                stack = digits[::-1]
+                
+                real_rgb = measured_colors[i]
+                
+                # Filter outliers: close to blue but doesn't contain blue
+                dist = np.linalg.norm(real_rgb - base_blue)
+                if dist < 60 and 3 not in stack:  # 3 is Blue in RYBW/CMYW
+                    dropped += 1
+                    continue
+                
+                valid_rgb.append(real_rgb)
+                valid_stacks.append(stack)
+            
+            self.lut_rgb = np.array(valid_rgb)
+            self.ref_stacks = np.array(valid_stacks)
+            
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (filtered {dropped} outliers)")
+        
+        # Build KD-Tree
         self.kdtree = KDTree(self.lut_rgb)
-        
-        print(f"✅ LUT loaded (filtered {dropped} outliers)")
     
     def process_image(self, image_path, target_width_mm, modeling_mode,
                      quantize_colors, auto_bg, bg_tol,
@@ -115,42 +285,70 @@ class LuminaImageProcessor:
         print(f"[IMAGE_PROCESSOR] Mode: {mode_name}")
         print(f"[IMAGE_PROCESSOR] Filter settings: blur_kernel={blur_kernel}, smooth_sigma={smooth_sigma}")
         
-        # Load image
-        img = Image.open(image_path).convert('RGBA')
+        # ========== Image Loading Logic Branch ==========
+        is_svg = image_path.lower().endswith('.svg')
         
-        # DEBUG: Check original image properties
-        print(f"[IMAGE_PROCESSOR] Original image: {image_path}")
-        print(f"[IMAGE_PROCESSOR] Image mode: {Image.open(image_path).mode}")
-        print(f"[IMAGE_PROCESSOR] Image size: {Image.open(image_path).size}")
-        
-        # Check if image has transparency
-        original_img = Image.open(image_path)
-        has_alpha = original_img.mode in ('RGBA', 'LA') or (original_img.mode == 'P' and 'transparency' in original_img.info)
-        print(f"[IMAGE_PROCESSOR] Has alpha channel: {has_alpha}")
-        
-        if has_alpha:
-            # Check alpha channel statistics
-            if original_img.mode != 'RGBA':
-                original_img = original_img.convert('RGBA')
-            alpha_data = np.array(original_img)[:, :, 3]
-            print(f"[IMAGE_PROCESSOR] Alpha stats: min={alpha_data.min()}, max={alpha_data.max()}, mean={alpha_data.mean():.1f}")
-            print(f"[IMAGE_PROCESSOR] Transparent pixels (alpha<10): {np.sum(alpha_data < 10)}")
-        
-        # Calculate target resolution
-        if use_high_fidelity:
-            # High-precision mode: 10 pixels/mm
-            PIXELS_PER_MM = 10
-            target_w = int(target_width_mm * PIXELS_PER_MM)
-            pixel_to_mm_scale = 1.0 / PIXELS_PER_MM  # 0.1 mm per pixel
-            print(f"[IMAGE_PROCESSOR] High-res mode: {PIXELS_PER_MM} px/mm")
+        if is_svg:
+            print("[IMAGE_PROCESSOR] SVG detected - Engaging Ultra-High-Fidelity Vector Mode")
+            img_arr = self._load_svg(image_path, target_width_mm)
+            # SVG reset to PIL object to reuse subsequent logic (e.g., get dimensions)
+            img = Image.fromarray(img_arr)
+            
+            # [CRITICAL] SVG is also a type of High-Fidelity, but it doesn't need denoising
+            # Force override filter parameters, because vector graphics have no noise, no need to blur
+            # 
+            # [SUPER-SAMPLING STRATEGY]
+            # We render at 20 px/mm (2x standard), which physically eliminates jaggies
+            # through super-sampling. This is superior to blur-based anti-aliasing
+            # because it preserves sharp edges while making curves smooth.
+            blur_kernel = 0
+            smooth_sigma = 0
+            print("[IMAGE_PROCESSOR] SVG Mode: Filters disabled (Vector source is clean)")
+            print("[IMAGE_PROCESSOR] Super-sampling at 20 px/mm eliminates jagged edges naturally")
+            
+            # Recalculate target_w/h (based on rendered dimensions)
+            target_w, target_h = img.size
+            pixel_to_mm_scale = 0.05  # 20 px/mm (1/20) - Ultra-High-Fidelity
         else:
-            # Pixel mode: Based on nozzle width
-            target_w = int(target_width_mm / PrinterConfig.NOZZLE_WIDTH)
-            pixel_to_mm_scale = PrinterConfig.NOZZLE_WIDTH
-            print(f"[IMAGE_PROCESSOR] Pixel mode: {1.0/pixel_to_mm_scale:.2f} px/mm")
+            # [Original Logic] Bitmap loading
+            # Load image
+            img = Image.open(image_path).convert('RGBA')
+            
+            # DEBUG: Check original image properties
+            print(f"[IMAGE_PROCESSOR] Original image: {image_path}")
+            print(f"[IMAGE_PROCESSOR] Image mode: {Image.open(image_path).mode}")
+            print(f"[IMAGE_PROCESSOR] Image size: {Image.open(image_path).size}")
+            
+            # Check if image has transparency
+            original_img = Image.open(image_path)
+            has_alpha = original_img.mode in ('RGBA', 'LA') or (original_img.mode == 'P' and 'transparency' in original_img.info)
+            print(f"[IMAGE_PROCESSOR] Has alpha channel: {has_alpha}")
+            
+            if has_alpha:
+                # Check alpha channel statistics
+                if original_img.mode != 'RGBA':
+                    original_img = original_img.convert('RGBA')
+                alpha_data = np.array(original_img)[:, :, 3]
+                print(f"[IMAGE_PROCESSOR] Alpha stats: min={alpha_data.min()}, max={alpha_data.max()}, mean={alpha_data.mean():.1f}")
+                print(f"[IMAGE_PROCESSOR] Transparent pixels (alpha<10): {np.sum(alpha_data < 10)}")
+            
+            # Calculate target resolution
+            if use_high_fidelity:
+                # High-precision mode: 10 pixels/mm
+                PIXELS_PER_MM = 10
+                target_w = int(target_width_mm * PIXELS_PER_MM)
+                pixel_to_mm_scale = 1.0 / PIXELS_PER_MM  # 0.1 mm per pixel
+                print(f"[IMAGE_PROCESSOR] High-res mode: {PIXELS_PER_MM} px/mm")
+            else:
+                # Pixel mode: Based on nozzle width
+                target_w = int(target_width_mm / PrinterConfig.NOZZLE_WIDTH)
+                pixel_to_mm_scale = PrinterConfig.NOZZLE_WIDTH
+                print(f"[IMAGE_PROCESSOR] Pixel mode: {1.0/pixel_to_mm_scale:.2f} px/mm")
+            
+            target_h = int(target_w * img.height / img.width)
+            print(f"[IMAGE_PROCESSOR] Target: {target_w}×{target_h}px ({target_w*pixel_to_mm_scale:.1f}×{target_h*pixel_to_mm_scale:.1f}mm)")
         
-        target_h = int(target_w * img.height / img.width)
-        print(f"[IMAGE_PROCESSOR] Target: {target_w}×{target_h}px ({target_w*pixel_to_mm_scale:.1f}×{target_h*pixel_to_mm_scale:.1f}mm)")
+        # ========== End of Image Loading Logic Branch ==========
         
         # ========== CRITICAL FIX: Use NEAREST for both modes ==========
         # REASON: LANCZOS anti-aliasing creates light transition pixels at edges.
@@ -219,6 +417,10 @@ class LuminaImageProcessor:
         High-fidelity mode image processing
         Includes configurable filtering, K-Means quantization and color matching
         
+        优化：
+        1. K-Means++ 初始化（OpenCV 默认支持）
+        2. 预缩放：在小图上做 K-Means，然后映射回原图
+        
         Args:
             rgb_arr: Input RGB array
             target_h: Target height
@@ -237,7 +439,7 @@ class LuminaImageProcessor:
             print(f"[IMAGE_PROCESSOR] Applying bilateral filter (sigma={smooth_sigma})...")
             rgb_processed = cv2.bilateralFilter(
                 rgb_arr.astype(np.uint8), 
-                d=9,  # Larger neighborhood for better smoothing
+                d=9,
                 sigmaColor=smooth_sigma, 
                 sigmaSpace=smooth_sigma
             )
@@ -247,38 +449,81 @@ class LuminaImageProcessor:
         
         # Step 2: Optional median filter (remove salt-and-pepper noise)
         if blur_kernel > 0:
-            # Ensure kernel size is odd
             kernel_size = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
             print(f"[IMAGE_PROCESSOR] Applying median blur (kernel={kernel_size})...")
             rgb_processed = cv2.medianBlur(rgb_processed, kernel_size)
         else:
             print(f"[IMAGE_PROCESSOR] Median blur disabled (kernel=0)")
         
-        # Step 3: Optional sharpening (enhance contours)
-        # Use gentle sharpening kernel to enhance details
-        sharpen_kernel = np.array([
-            [0, -0.5, 0],
-            [-0.5, 3, -0.5],
-            [0, -0.5, 0]
-        ])
-        print(f"[IMAGE_PROCESSOR] Applying subtle sharpening...")
-        rgb_sharpened = cv2.filter2D(rgb_processed, -1, sharpen_kernel)
-        rgb_sharpened = np.clip(rgb_sharpened, 0, 255).astype(np.uint8)
+        # Step 3: Skip sharpening to prevent noise amplification
+        # Sharpening creates high-contrast noise in flat color areas
+        print(f"[IMAGE_PROCESSOR] Skipping sharpening to reduce noise...")
+        rgb_sharpened = rgb_processed
         
-        # Step 4: K-Means quantization
-        print(f"[IMAGE_PROCESSOR] K-Means quantization to {quantize_colors} colors...")
+        # Step 4: K-Means quantization with pre-scaling optimization
         h, w = rgb_sharpened.shape[:2]
-        pixels = rgb_sharpened.reshape(-1, 3).astype(np.float32)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-        flags = cv2.KMEANS_PP_CENTERS
+        total_pixels = h * w
         
-        _, labels, centers = cv2.kmeans(
-            pixels, quantize_colors, None, criteria, 10, flags
-        )
+        # 方案 3：预缩放优化
+        # 如果像素数超过 50 万，先缩小做 K-Means，再映射回原图
+        KMEANS_PIXEL_THRESHOLD = 500_000
         
-        centers = centers.astype(np.uint8)
-        quantized_pixels = centers[labels.flatten()]
-        quantized_image = quantized_pixels.reshape(h, w, 3)
+        if total_pixels > KMEANS_PIXEL_THRESHOLD:
+            # 计算缩放比例，目标 50 万像素
+            scale_factor = np.sqrt(total_pixels / KMEANS_PIXEL_THRESHOLD)
+            small_h = int(h / scale_factor)
+            small_w = int(w / scale_factor)
+            
+            print(f"[IMAGE_PROCESSOR] 🚀 Pre-scaling optimization: {w}×{h} → {small_w}×{small_h} ({total_pixels:,} → {small_w*small_h:,} pixels)")
+            
+            # 缩小图片
+            rgb_small = cv2.resize(rgb_sharpened, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            
+            # 在小图上做 K-Means（使用 K-Means++ 初始化）
+            pixels_small = rgb_small.reshape(-1, 3).astype(np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.5)
+            flags = cv2.KMEANS_PP_CENTERS  # K-Means++ 初始化
+            
+            print(f"[IMAGE_PROCESSOR] K-Means++ on downscaled image ({quantize_colors} colors)...")
+            _, _, centers = cv2.kmeans(
+                pixels_small, quantize_colors, None, criteria, 5, flags
+            )
+            
+            # 用得到的 centers 直接映射原图（不再迭代，只做最近邻查找）
+            print(f"[IMAGE_PROCESSOR] Mapping centers to full image...")
+            centers = centers.astype(np.float32)
+            pixels_full = rgb_sharpened.reshape(-1, 3).astype(np.float32)
+            
+            # 批量计算每个像素到所有 centers 的距离，找最近的
+            # 使用 KDTree 加速
+            from scipy.spatial import KDTree
+            centers_tree = KDTree(centers)
+            _, labels = centers_tree.query(pixels_full)
+            
+            centers = centers.astype(np.uint8)
+            quantized_pixels = centers[labels]
+            quantized_image = quantized_pixels.reshape(h, w, 3)
+            
+            print(f"[IMAGE_PROCESSOR] ✅ Pre-scaling optimization complete!")
+        else:
+            # 小图直接做 K-Means
+            print(f"[IMAGE_PROCESSOR] K-Means++ quantization to {quantize_colors} colors...")
+            pixels = rgb_sharpened.reshape(-1, 3).astype(np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
+            flags = cv2.KMEANS_PP_CENTERS
+            
+            _, labels, centers = cv2.kmeans(
+                pixels, quantize_colors, None, criteria, 10, flags
+            )
+            
+            centers = centers.astype(np.uint8)
+            quantized_pixels = centers[labels.flatten()]
+            quantized_image = quantized_pixels.reshape(h, w, 3)
+        
+        # [CRITICAL FIX] Post-Quantization Cleanup
+        # Removes isolated "salt-and-pepper" noise pixels that survive quantization
+        print(f"[IMAGE_PROCESSOR] Applying post-quantization cleanup (Denoising)...")
+        quantized_image = cv2.medianBlur(quantized_image, 3)  # Kernel size 3 is optimal for detail preservation
         
         print(f"[IMAGE_PROCESSOR] Quantization complete!")
         
@@ -298,25 +543,32 @@ class LuminaImageProcessor:
             color_to_stack[color_key] = self.ref_stacks[unique_indices[i]]
             color_to_rgb[color_key] = self.lut_rgb[unique_indices[i]]
         
-        # Map back to full image
+        # Map back to full image (vectorized for speed)
         print(f"[IMAGE_PROCESSOR] Mapping to full image...")
         matched_rgb = np.zeros((target_h, target_w, 3), dtype=np.uint8)
         material_matrix = np.zeros((target_h, target_w, PrinterConfig.COLOR_LAYERS), dtype=int)
         
-        for y in range(target_h):
-            for x in range(target_w):
-                color_key = tuple(quantized_image[y, x])
-                matched_rgb[y, x] = color_to_rgb[color_key]
-                material_matrix[y, x] = color_to_stack[color_key]
+        # 向量化映射，避免双重循环
+        flat_quantized = quantized_image.reshape(-1, 3)
+        flat_matched = np.zeros((target_h * target_w, 3), dtype=np.uint8)
+        flat_material = np.zeros((target_h * target_w, PrinterConfig.COLOR_LAYERS), dtype=int)
+        
+        for color_key, stack in color_to_stack.items():
+            mask = np.all(flat_quantized == np.array(color_key), axis=1)
+            flat_matched[mask] = color_to_rgb[color_key]
+            flat_material[mask] = stack
+        
+        matched_rgb = flat_matched.reshape(target_h, target_w, 3)
+        material_matrix = flat_material.reshape(target_h, target_w, PrinterConfig.COLOR_LAYERS)
         
         print(f"[IMAGE_PROCESSOR] Color matching complete!")
         
         # Prepare debug data
         debug_data = {
-            'quantized_image': quantized_image.copy(),  # K-Means quantized image
+            'quantized_image': quantized_image.copy(),
             'num_colors': len(unique_colors),
-            'bilateral_filtered': rgb_processed.copy(),  # Filtered image
-            'sharpened': rgb_sharpened.copy(),  # Sharpened image
+            'bilateral_filtered': rgb_processed.copy(),
+            'sharpened': rgb_sharpened.copy(),
             'filter_settings': {
                 'blur_kernel': blur_kernel,
                 'smooth_sigma': smooth_sigma

@@ -1,6 +1,7 @@
 """
 Lumina Studio - Color Extractor Module
-Color extraction module
+
+Extracts color data from printed calibration boards.
 """
 
 import os
@@ -44,6 +45,7 @@ def generate_simulated_reference():
 
 
 def rotate_image(img, direction):
+    """Rotate image 90 degrees left or right."""
     if img is None:
         return None
     if direction in ("左旋 90°", "Rotate Left 90°"):
@@ -62,8 +64,14 @@ def draw_corner_points(img, points, color_mode: str):
     color_conf = ColorSystem.get(color_mode)
     labels = color_conf['corner_labels']
 
-    # Define colors for drawing (BGR for OpenCV)
-    if "CMYW" in color_mode:
+    if "6-Color" in color_mode:
+        draw_colors = [
+            (255, 255, 255),  # White
+            (214, 134, 0),    # Cyan (BGR)
+            (140, 0, 236),    # Magenta (BGR)
+            (42, 238, 244)    # Yellow (BGR)
+        ]
+    elif "CMYW" in color_mode:
         draw_colors = [
             (255, 255, 255),  # White
             (214, 134, 0),    # Cyan (BGR)
@@ -81,15 +89,11 @@ def draw_corner_points(img, points, color_mode: str):
     for i, pt in enumerate(points):
         color = draw_colors[i] if i < 4 else (0, 255, 0)
 
-        # Draw filled circle
         cv2.circle(vis, (int(pt[0]), int(pt[1])), 15, color, -1)
-        # Draw outline
         cv2.circle(vis, (int(pt[0]), int(pt[1])), 15, (0, 0, 0), 2)
-        # Draw number
         cv2.putText(vis, str(i + 1), (int(pt[0]) + 20, int(pt[1]) + 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
-        # Draw label
         if i < 4:
             cv2.putText(vis, labels[i], (int(pt[0]) + 20, int(pt[1]) + 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
@@ -97,6 +101,7 @@ def draw_corner_points(img, points, color_mode: str):
 
 
 def apply_auto_white_balance(img):
+    """Apply automatic white balance correction."""
     h, w, _ = img.shape
     m = 50
     corners = [img[0:m, 0:m], img[0:m, w-m:w], img[h-m:h, 0:m], img[h-m:h, w-m:w]]
@@ -106,6 +111,7 @@ def apply_auto_white_balance(img):
 
 
 def apply_brightness_correction(img):
+    """Apply vignette/brightness correction."""
     h, w, _ = img.shape
     img_lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
     l, a, b = cv2.split(img_lab)
@@ -124,15 +130,43 @@ def apply_brightness_correction(img):
     return cv2.cvtColor(cv2.merge([l_new, a, b]), cv2.COLOR_LAB2RGB)
 
 
-def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright):
-    """Main extraction pipeline."""
+def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, color_mode="CMYW"):
+    """
+    Main extraction pipeline with dynamic grid size support.
+    
+    Args:
+        img: Input image
+        points: Four corner points
+        offset_x: X offset correction
+        offset_y: Y offset correction
+        zoom: Zoom correction
+        barrel: Barrel distortion correction
+        wb: Enable white balance
+        bright: Enable brightness correction
+        color_mode: Color system mode
+    
+    Returns:
+        Tuple of (visualization, preview, lut_path, status_message)
+    """
     if img is None:
         return None, None, None, "❌ 请先上传图片"
     if len(points) != 4:
         return None, None, None, "❌ 请点击4个角点"
+    
+    # 动态确定网格大小
+    if "6-Color" in color_mode:
+        grid_size = 36          # 核心数据还是 36x36 (1296色)
+        physical_grid = 38      # 物理上有 38x38 (含边框)
+        total_cells = 1296
+    else:
+        grid_size = DATA_GRID_SIZE  # 32
+        physical_grid = PHYSICAL_GRID_SIZE  # 34
+        total_cells = 1024
+    
+    print(f"[EXTRACTOR] Mode: {color_mode}, Logic: {grid_size}x{grid_size} inside {physical_grid}x{physical_grid}")
 
     # Perspective transform
-    half = CELL_SIZE / 2.0
+    half = DST_SIZE / physical_grid / 2.0
     src = np.float32(points)
     dst = np.float32([
         [half, half], [DST_SIZE - half, half],
@@ -148,14 +182,19 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright):
         warped = apply_brightness_correction(warped)
 
     # Sampling
-    extracted = np.zeros((DATA_GRID_SIZE, DATA_GRID_SIZE, 3), dtype=np.uint8)
+    extracted = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
     vis = warped.copy()
 
-    for r in range(DATA_GRID_SIZE):
-        for c in range(DATA_GRID_SIZE):
-            phys_r, phys_c = r + 1, c + 1
-            nx = (phys_c + 0.5) / PHYSICAL_GRID_SIZE * 2 - 1
-            ny = (phys_r + 0.5) / PHYSICAL_GRID_SIZE * 2 - 1
+    for r in range(grid_size):
+        for c in range(grid_size):
+            # 【关键】计算物理位置时的偏移
+            # 无论是 4色 还是 6色，因为都有 1 格边框，所以都需要 +1
+            phys_r = r + 1
+            phys_c = c + 1
+            
+            # 归一化坐标 [-1, 1] (基于 physical_grid)
+            nx = (phys_c + 0.5) / physical_grid * 2 - 1
+            ny = (phys_r + 0.5) / physical_grid * 2 - 1
 
             rad = np.sqrt(nx**2 + ny**2)
             k = 1 + barrel * (rad**2)
@@ -179,10 +218,11 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright):
 
     Stats.increment("extractions")
 
-    return vis, prev, LUT_FILE_PATH, "✅ 提取完成！LUT已保存"
+    return vis, prev, LUT_FILE_PATH, f"✅ 提取完成！({grid_size}x{grid_size}, {total_cells}色) LUT已保存"
 
 
 def probe_lut_cell(evt: gr.SelectData):
+    """Probe a specific cell in the LUT for manual inspection."""
     if not os.path.exists(LUT_FILE_PATH):
         return "⚠️ 无数据", None, None
     try:
@@ -210,6 +250,7 @@ def probe_lut_cell(evt: gr.SelectData):
 
 
 def manual_fix_cell(coord, color_input):
+    """Manually fix a specific cell color in the LUT."""
     if not coord or not os.path.exists(LUT_FILE_PATH):
         return None, "⚠️ 错误"
 

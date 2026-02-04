@@ -1,22 +1,39 @@
 """
 Lumina Studio - Calibration Generator Module
-Calibration board generation module
+
+Generates calibration boards for physical color testing.
 """
 
 import os
 from typing import Optional
+import itertools
 
 import numpy as np
 import trimesh
 from PIL import Image
 
-from config import PrinterConfig, ColorSystem, OUTPUT_DIR
+from colormath.color_objects import sRGBColor, LabColor
+from colormath.color_conversions import convert_color
+from colormath.color_diff import delta_e_cie2000
+
+from config import PrinterConfig, ColorSystem, SmartConfig, OUTPUT_DIR
 from utils import Stats, safe_fix_3mf_names
 
 
 def _generate_voxel_mesh(voxel_matrix: np.ndarray, material_index: int,
                           grid_h: int, grid_w: int) -> Optional[trimesh.Trimesh]:
-    """Generate mesh for a specific material from voxel data."""
+    """
+    Generate mesh for a specific material from voxel data.
+    
+    Args:
+        voxel_matrix: 3D array of material indices (Z, H, W)
+        material_index: Material ID to generate mesh for
+        grid_h: Grid height in voxels
+        grid_w: Grid width in voxels
+    
+    Returns:
+        Trimesh object or None if no voxels found
+    """
     scale_x = PrinterConfig.NOZZLE_WIDTH
     scale_y = PrinterConfig.NOZZLE_WIDTH
     scale_z = PrinterConfig.LAYER_HEIGHT
@@ -65,8 +82,18 @@ def _generate_voxel_mesh(voxel_matrix: np.ndarray, material_index: int,
 
 def generate_calibration_board(color_mode: str, block_size_mm: float,
                                 gap_mm: float, backing_color: str):
-    """Generate a 1024-color calibration board as 3MF."""
-
+    """
+    Generate a 1024-color calibration board as 3MF.
+    
+    Args:
+        color_mode: Color system mode (CMYW/RYBW)
+        block_size_mm: Size of each color block in mm
+        gap_mm: Gap between blocks in mm
+        backing_color: Color name for backing layer
+    
+    Returns:
+        Tuple of (output_path, preview_image, status_message)
+    """
     color_conf = ColorSystem.get(color_mode)
     slot_names = color_conf['slots']
     preview_colors = color_conf['preview']
@@ -74,7 +101,6 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
 
     backing_id = color_map.get(backing_color, 0)
 
-    # Grid setup
     grid_dim, padding = 32, 1
     total_w = total_h = grid_dim + (padding * 2)
 
@@ -89,7 +115,7 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
 
     full_matrix = np.full((total_layers, voxel_h, voxel_w), backing_id, dtype=int)
 
-    # Generate 1024 permutations
+    # Generate 1024 permutations (4^5 combinations)
     for i in range(1024):
         digits = []
         temp = i
@@ -106,22 +132,15 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
         for z in range(PrinterConfig.COLOR_LAYERS):
             full_matrix[z, py:py+pixels_per_block, px:px+pixels_per_block] = stack[z]
 
-    # Corner markers - Set different corner colors based on mode
-    # Corner positions: (row, col, mat_id)
-    # row=0 is top, row=total_h-1 is bottom
-    # col=0 is left, col=total_w-1 is right
+    # Set corner markers with mode-specific colors
     if "RYBW" in color_mode:
-        # RYBW: slots = [White(0), Red(1), Yellow(2), Blue(3)]
-        # corner_labels: TL=White, TR=Red, BR=Blue, BL=Yellow
         corners = [
             (0, 0, 0),              # TL = White
             (0, total_w-1, 1),      # TR = Red
             (total_h-1, total_w-1, 3),  # BR = Blue
             (total_h-1, 0, 2)       # BL = Yellow
         ]
-    else:
-        # CMYW: slots = [White(0), Cyan(1), Magenta(2), Yellow(3)]
-        # corner_labels: TL=White, TR=Cyan, BR=Magenta, BL=Yellow
+    else:  # CMYW
         corners = [
             (0, 0, 0),              # TL = White
             (0, total_w-1, 1),      # TR = Cyan
@@ -135,14 +154,13 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
         for z in range(PrinterConfig.COLOR_LAYERS):
             full_matrix[z, py:py+pixels_per_block, px:px+pixels_per_block] = mat_id
 
-    # Build 3MF
+    # Build 3MF scene
     scene = trimesh.Scene()
     for mat_id in range(4):
         mesh = _generate_voxel_mesh(full_matrix, mat_id, voxel_h, voxel_w)
         if mesh:
             mesh.visual.face_colors = preview_colors[mat_id]
             name = slot_names[mat_id]
-            # Set multiple name attributes to increase compatibility
             mesh.metadata['name'] = name
             scene.add_geometry(mesh, node_name=name, geom_name=name)
 
@@ -151,10 +169,9 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
     output_path = os.path.join(OUTPUT_DIR, f"Lumina_Calibration_{mode_tag}.3mf")
     scene.export(output_path)
 
-    # Fix object names in 3MF for better slicer compatibility
     safe_fix_3mf_names(output_path, slot_names)
 
-    # Preview
+    # Generate preview
     bottom_layer = full_matrix[0].astype(np.uint8)
     preview_arr = np.zeros((voxel_h, voxel_w, 3), dtype=np.uint8)
     for mat_id, rgba in preview_colors.items():
@@ -163,3 +180,230 @@ def generate_calibration_board(color_mode: str, block_size_mm: float,
     Stats.increment("calibrations")
 
     return output_path, Image.fromarray(preview_arr), f"✅ 校准板已生成！已组合为一个对象 | 颜色: {', '.join(slot_names)}"
+
+
+
+# ========== Lumina Smart 1296 (6-Color System) ==========
+
+def get_top_1296_colors():
+    """
+    Intelligent color selection algorithm for 6-color system.
+    
+    Returns 1296 most representative color combinations from 7776 possible
+    combinations (6^5) to fill a 36x36 grid without gaps.
+    
+    This function is public and can be called by image_processing.py to
+    reconstruct the stacking order.
+    
+    Returns:
+        List of 1296 tuples, each representing a 5-layer color stack
+    """
+    print("[SMART] Simulating 6^5 = 7776 combinations...")
+    
+    # Simulate all combinations in Lab color space
+    candidates = []
+    filaments = SmartConfig.FILAMENTS
+    layer_h = PrinterConfig.LAYER_HEIGHT
+    backing = np.array([255, 255, 255])
+    
+    # Pre-calculate single layer alpha values
+    alphas = {}
+    for fid, props in filaments.items():
+        bd = props['td'] / 10.0
+        alphas[fid] = min(1.0, layer_h / bd) if bd > 0 else 1.0
+    
+    # Generate all 6^5 combinations
+    for stack in itertools.product(range(6), repeat=5):
+        # Fast color mixing simulation
+        curr = backing.astype(float)
+        for fid in stack:
+            rgb = np.array(filaments[fid]['rgb'])
+            a = alphas[fid]
+            curr = rgb * a + curr * (1.0 - a)
+        
+        final_rgb = curr.astype(np.uint8)
+        
+        # Convert to Lab for color difference calculation
+        srgb = sRGBColor(final_rgb[0]/255.0, final_rgb[1]/255.0, final_rgb[2]/255.0)
+        lab = convert_color(srgb, LabColor)
+        
+        candidates.append({
+            "stack": stack,
+            "lab": lab,
+            "rgb": final_rgb
+        })
+    
+    print(f"[SMART] Total candidates: {len(candidates)}. Filtering top 1296...")
+    
+    # Greedy selection algorithm
+    selected = []
+    
+    # Pre-select seed colors (6 pure colors)
+    for i in range(6):
+        stack = (i,) * 5
+        for c in candidates:
+            if c['stack'] == stack:
+                selected.append(c)
+                break
+    
+    print(f"[SMART] Seed colors: {len(selected)}")
+    
+    # Round 1: High quality selection (RGB distance > 8)
+    target = 1296
+    for c in candidates:
+        if len(selected) >= target:
+            break
+        if any(c['stack'] == s['stack'] for s in selected):
+            continue
+        
+        is_distinct = True
+        for s in selected:
+            if np.linalg.norm(c['rgb'].astype(int) - s['rgb'].astype(int)) < 8:
+                is_distinct = False
+                break
+        
+        if is_distinct:
+            selected.append(c)
+    
+    print(f"[SMART] Round 1 (High Quality) selected: {len(selected)}")
+    
+    # Round 2: Fill remaining slots with lower threshold
+    if len(selected) < target:
+        print(f"[SMART] Filling remaining {target - len(selected)} spots...")
+        for c in candidates:
+            if len(selected) >= target:
+                break
+            if any(c['stack'] == s['stack'] for s in selected):
+                continue
+            selected.append(c)
+    
+    print(f"[SMART] Final selection: {len(selected)} colors")
+    
+    return [s['stack'] for s in selected[:target]]
+
+
+def generate_smart_board(block_size_mm=5.0, gap_mm=0.8):
+    """
+    Generate Lumina Smart 1296 (6-Color) calibration board with 38x38 border layout.
+    
+    Features:
+    - 38x38 physical grid (36x36 data + 2 border protection)
+    - 1296 intelligently selected color blocks
+    - Corner alignment markers in outermost ring
+    - Face Down printing optimization
+    
+    Args:
+        block_size_mm: Size of each color block in mm
+        gap_mm: Gap between blocks in mm
+    
+    Returns:
+        Tuple of (output_path, preview_image, status_message)
+    """
+    print("[SMART] Generating Smart 1296 calibration board (38x38 Layout)...")
+    
+    # Get 1296 intelligently selected colors
+    stacks = get_top_1296_colors()
+    
+    # Geometry parameters (38x38 layout)
+    data_dim = 36
+    padding = 1
+    total_dim = data_dim + 2 * padding
+    block_w = float(block_size_mm)
+    gap = float(gap_mm)
+    margin = 5.0
+    
+    # Calculate board dimensions (based on 38x38)
+    board_w = margin * 2 + total_dim * block_w + (total_dim - 1) * gap
+    board_h = board_w
+    
+    print(f"[SMART] Board size: {board_w:.1f} x {board_h:.1f} mm (Grid: {total_dim}x{total_dim})")
+    
+    # Get color configuration
+    color_conf = ColorSystem.SIX_COLOR
+    preview_colors = color_conf['preview']
+    slot_names = color_conf['slots']
+    
+    # Calculate voxel grid dimensions (based on 38x38)
+    pixels_per_block = max(1, int(block_w / PrinterConfig.NOZZLE_WIDTH))
+    pixels_gap = max(1, int(gap / PrinterConfig.NOZZLE_WIDTH))
+    
+    voxel_w = total_dim * (pixels_per_block + pixels_gap)
+    voxel_h = total_dim * (pixels_per_block + pixels_gap)
+    
+    # Layer configuration
+    color_layers = 5
+    backing_layers = int(PrinterConfig.BACKING_MM / PrinterConfig.LAYER_HEIGHT)
+    total_layers = color_layers + backing_layers
+    
+    # Initialize voxel matrix (filled with White Slot 0)
+    full_matrix = np.full((total_layers, voxel_h, voxel_w), 0, dtype=int)
+    
+    print(f"[SMART] Voxel matrix: {total_layers} x {voxel_h} x {voxel_w}")
+    
+    # Fill 1296 intelligent color blocks (with padding offset)
+    for idx, stack in enumerate(stacks):
+        # Data area logical coordinates (0..35)
+        r_data = idx // data_dim
+        c_data = idx % data_dim
+        
+        # Physical area coordinates (with border offset -> 1..36)
+        row = r_data + padding
+        col = c_data + padding
+        
+        px = col * (pixels_per_block + pixels_gap)
+        py = row * (pixels_per_block + pixels_gap)
+        
+        # Fill 5 color layers (note Z-axis reversal for Face Down mode)
+        # Z=0 (physical first layer) = viewing surface = stack[4] (top layer in simulation)
+        # Z=4 (physical fifth layer) = internal layer = stack[0] (bottom layer in simulation)
+        for z in range(color_layers):
+            mat_id = stack[color_layers - 1 - z]
+            full_matrix[z, py:py+pixels_per_block, px:px+pixels_per_block] = mat_id
+    
+    # Set corner alignment markers (in outermost ring 0 and 37)
+    # TL: White (0), TR: Cyan (1), BR: Magenta (2), BL: Yellow (4)
+    corners = [
+        (0, 0, 0),                      # TL = White
+        (0, total_dim-1, 1),            # TR = Cyan
+        (total_dim-1, total_dim-1, 2),  # BR = Magenta
+        (total_dim-1, 0, 4)             # BL = Yellow
+    ]
+    
+    for r, c, mat_id in corners:
+        px = c * (pixels_per_block + pixels_gap)
+        py = r * (pixels_per_block + pixels_gap)
+        for z in range(color_layers):
+            full_matrix[z, py:py+pixels_per_block, px:px+pixels_per_block] = mat_id
+    
+    # Generate 3MF scene
+    scene = trimesh.Scene()
+    
+    for mat_id in range(6):
+        mesh = _generate_voxel_mesh(full_matrix, mat_id, voxel_h, voxel_w)
+        if mesh:
+            mesh.visual.face_colors = preview_colors[mat_id]
+            name = slot_names[mat_id]
+            mesh.metadata['name'] = name
+            scene.add_geometry(mesh, node_name=name, geom_name=name)
+    
+    # Export
+    output_path = os.path.join(OUTPUT_DIR, "Lumina_Smart_1296.3mf")
+    scene.export(output_path)
+    
+    safe_fix_3mf_names(output_path, slot_names)
+    
+    # Generate preview image
+    bottom_layer = full_matrix[0].astype(np.uint8)
+    preview_arr = np.zeros((voxel_h, voxel_w, 3), dtype=np.uint8)
+    for mat_id, rgba in preview_colors.items():
+        preview_arr[bottom_layer == mat_id] = rgba[:3]
+    
+    Stats.increment("calibrations")
+    
+    print(f"[SMART] ✅ Smart 1296 board generated: {output_path}")
+    
+    return (
+        output_path,
+        Image.fromarray(preview_arr),
+        f"✅ Smart 1296 (38x38边框版) 生成完毕 | 尺寸: {board_w:.1f}mm | 颜色: {', '.join(slot_names)}"
+    )

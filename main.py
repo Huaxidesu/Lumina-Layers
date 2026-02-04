@@ -1,6 +1,6 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║                          LUMINA STUDIO v1.4.2                                 ║
+║                          LUMINA STUDIO v1.5.2                                 ║
 ║                    Multi-Material 3D Print Color System                       ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Author: [MIN]                                                                ║
@@ -12,7 +12,16 @@ Main Entry Point
 
 import os
 
-# 设置 Gradio 临时目录到项目目录，避免写入 C 盘临时目录
+# Colormath compatibility with numpy 1.20+ (run before other imports).
+import numpy as np
+
+
+def patch_asscalar(a):
+    """Replace deprecated numpy.asscalar for colormath."""
+    return a.item()
+
+setattr(np, "asscalar", patch_asscalar)
+
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 _GRADIO_TEMP = os.path.join(_PROJECT_ROOT, "output", ".gradio_cache")
 os.makedirs(_GRADIO_TEMP, exist_ok=True)
@@ -34,6 +43,7 @@ if HAS_DISPLAY:
         HAS_DISPLAY = False
         
 def find_available_port(start_port=7860, max_attempts=1000):
+    """Return first free port in [start_port, start_port + max_attempts)."""
     import socket
     for i in range(max_attempts):
         port = start_port + i
@@ -48,24 +58,20 @@ def start_browser(port):
     webbrowser.open(f"http://127.0.0.1:{port}")
 
 if __name__ == "__main__":
-
-    # 1. Initialize System Tray
     tray = None
-    PORT = 7860 # Default fallback
+    PORT = 7860
     try:
         PORT = find_available_port(7860)
         tray = LuminaTray(port=PORT)
     except Exception as e:
         print(f"⚠️ Warning: Failed to initialize tray: {e}")
 
-    # 2. Start Browser Thread (Fix: Added args=(PORT,))
     threading.Thread(target=start_browser, args=(PORT,), daemon=True).start()
-
-    # 3. Launch Gradio App
     print(f"✨ Lumina Studio is running on http://127.0.0.1:{PORT}")
     app = create_app()
 
     try:
+        from ui.layout_new import HEADER_CSS
         app.launch(
             inbrowser=False,
             server_name="0.0.0.0",
@@ -73,7 +79,7 @@ if __name__ == "__main__":
             show_error=True,
             prevent_thread_lock=True,
             favicon_path="icon.ico" if os.path.exists("icon.ico") else None,
-            css=CUSTOM_CSS,
+            css=CUSTOM_CSS + HEADER_CSS,
             theme=gr.themes.Soft()
         )
     except Exception as e:
@@ -81,14 +87,12 @@ if __name__ == "__main__":
     except BaseException as e:
         raise
 
-    # 4. Start System Tray (Blocking) or Keep Alive
     if tray:
         try:
             print("🚀 Starting System Tray...")
             tray.run()
         except Exception as e:
             print(f"⚠️ Warning: System tray crashed: {e}")
-            # Fallback if tray crashes immediately
             try:
                 while True:
                     time.sleep(1)
