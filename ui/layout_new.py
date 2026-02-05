@@ -818,7 +818,7 @@ def create_converter_tab_content(lang: str) -> dict:
             
             # Hidden textbox for JavaScript to pass crop data to Python (use CSS to hide)
             crop_data_json = gr.Textbox(
-                value='{"x":0,"y":0,"w":100,"h":100}',
+                value='{"x":0,"y":0,"w":100,"h":100,"autoColor":true}',
                 elem_id="crop-data-json",
                 visible=True,
                 elem_classes=["hidden-crop-component"]
@@ -923,8 +923,16 @@ def create_converter_tab_content(lang: str) -> dict:
                     components['slider_conv_quantize_colors'] = gr.Slider(
                         minimum=8, maximum=256, step=8, value=64,
                         label=I18n.get('conv_quantize_colors', lang),
-                        info=I18n.get('conv_quantize_info', lang)
+                        info=I18n.get('conv_quantize_info', lang),
+                        scale=3
                     )
+                    components['btn_conv_auto_color'] = gr.Button(
+                        I18n.get('conv_auto_color_btn', lang),
+                        variant="secondary",
+                        size="sm",
+                        scale=1
+                    )
+                with gr.Row():
                     components['slider_conv_tolerance'] = gr.Slider(
                         0, 150, 40,
                         label=I18n.get('conv_tolerance', lang),
@@ -1152,7 +1160,7 @@ def create_converter_tab_content(lang: str) -> dict:
     from core.image_preprocessor import ImagePreprocessor
     
     def on_image_upload_process_with_html(image_path):
-        """When image is uploaded, process and prepare for crop modal"""
+        """When image is uploaded, process and prepare for crop modal (不分析颜色)"""
         if image_path is None:
             return (
                 0, 0, None,
@@ -1161,13 +1169,14 @@ def create_converter_tab_content(lang: str) -> dict:
         
         try:
             info = ImagePreprocessor.process_upload(image_path)
+            # 不在这里分析颜色，等用户确认裁剪后再分析
             dimensions_html = f'<div id="preprocess-dimensions-data" data-width="{info.width}" data-height="{info.height}" style="display:none;"></div>'
             return (info.width, info.height, info.processed_path, dimensions_html)
         except Exception as e:
             print(f"Image upload error: {e}")
             return (0, 0, None, '<div id="preprocess-dimensions-data" data-width="0" data-height="0" style="display:none;"></div>')
     
-    # JavaScript to open crop modal
+    # JavaScript to open crop modal (不传递颜色推荐，弹窗中不显示)
     open_crop_modal_js = """
     () => {
         setTimeout(() => {
@@ -1180,7 +1189,7 @@ def create_converter_tab_content(lang: str) -> dict:
                     if (imgContainer) {
                         const img = imgContainer.querySelector('img');
                         if (img && img.src && typeof window.openCropModal === 'function') {
-                            window.openCropModal(img.src, width, height);
+                            window.openCropModal(img.src, width, height, 0, 0);
                         }
                     }
                 }
@@ -1200,24 +1209,27 @@ def create_converter_tab_content(lang: str) -> dict:
         js=open_crop_modal_js
     )
     
-    def use_original_image(processed_path, w, h):
+    def use_original_image_simple(processed_path, w, h, crop_json):
         """Use original image without cropping"""
+        print(f"[DEBUG] use_original_image_simple called: {processed_path}")
         if processed_path is None:
             return None
         try:
-            return ImagePreprocessor.convert_to_png(processed_path)
+            result_path = ImagePreprocessor.convert_to_png(processed_path)
+            return result_path
         except Exception as e:
             print(f"Use original error: {e}")
             return None
     
     use_original_btn.click(
-        use_original_image,
-        inputs=[preprocess_processed_path, preprocess_img_width, preprocess_img_height],
+        use_original_image_simple,
+        inputs=[preprocess_processed_path, preprocess_img_width, preprocess_img_height, crop_data_json],
         outputs=[components['image_conv_image_label']]
     )
     
-    def confirm_crop_image(processed_path, crop_json):
-        """Crop image with specified region from JSON data"""
+    def confirm_crop_image_simple(processed_path, crop_json):
+        """Crop image with specified region"""
+        print(f"[DEBUG] confirm_crop_image_simple called: {processed_path}, {crop_json}")
         if processed_path is None:
             return None
         try:
@@ -1227,15 +1239,79 @@ def create_converter_tab_content(lang: str) -> dict:
             y = int(data.get("y", 0))
             w = int(data.get("w", 100))
             h = int(data.get("h", 100))
-            return ImagePreprocessor.crop_image(processed_path, x, y, w, h)
+            
+            result_path = ImagePreprocessor.crop_image(processed_path, x, y, w, h)
+            return result_path
         except Exception as e:
             print(f"Crop error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     confirm_crop_btn.click(
-        confirm_crop_image,
+        confirm_crop_image_simple,
         inputs=[preprocess_processed_path, crop_data_json],
         outputs=[components['image_conv_image_label']]
+    )
+    
+    # ========== Auto Color Detection Button ==========
+    # 用于触发 toast 的隐藏 HTML 组件
+    color_toast_trigger = gr.HTML(value="", visible=True, elem_classes=["hidden-crop-component"])
+    
+    # JavaScript to show color recommendation toast
+    show_toast_js = """
+    () => {
+        setTimeout(() => {
+            const trigger = document.querySelector('#color-rec-trigger');
+            if (trigger) {
+                const recommended = parseInt(trigger.dataset.recommended) || 0;
+                const maxSafe = parseInt(trigger.dataset.maxsafe) || 0;
+                if (recommended > 0 && typeof window.showColorRecommendationToast === 'function') {
+                    const lang = document.documentElement.lang || 'zh';
+                    let msg;
+                    if (lang === 'en') {
+                        msg = '💡 Color detail set to <b>' + recommended + '</b> (max safe: ' + maxSafe + ')';
+                    } else {
+                        msg = '💡 色彩细节已设置为 <b>' + recommended + '</b>（最大安全值: ' + maxSafe + '）';
+                    }
+                    window.showColorRecommendationToast(msg);
+                }
+                trigger.remove();
+            }
+        }, 100);
+    }
+    """
+    
+    def auto_detect_colors(image_path, target_width_mm):
+        """自动检测推荐的色彩细节值"""
+        if image_path is None:
+            return gr.update(), ""
+        try:
+            import time
+            print(f"[AutoColor] 开始分析: {image_path}, 目标宽度: {target_width_mm}mm")
+            color_analysis = ImagePreprocessor.analyze_recommended_colors(image_path, target_width_mm)
+            recommended = color_analysis.get('recommended', 24)
+            max_safe = color_analysis.get('max_safe', 32)
+            print(f"[AutoColor] 分析完成: recommended={recommended}, max_safe={max_safe}")
+            # 添加时间戳确保每次返回值不同，触发 .then() 中的 JavaScript
+            timestamp = int(time.time() * 1000)
+            toast_html = f'<div id="color-rec-trigger" data-recommended="{recommended}" data-maxsafe="{max_safe}" data-ts="{timestamp}" style="display:none;"></div>'
+            return gr.update(value=recommended), toast_html
+        except Exception as e:
+            print(f"[AutoColor] 分析失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return gr.update(), ""
+    
+    components['btn_conv_auto_color'].click(
+        auto_detect_colors,
+        inputs=[components['image_conv_image_label'], components['slider_conv_width']],
+        outputs=[components['slider_conv_quantize_colors'], color_toast_trigger]
+    ).then(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        js=show_toast_js
     )
     # ========== END Image Crop Extension Events ==========
 
