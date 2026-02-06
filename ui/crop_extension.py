@@ -27,22 +27,22 @@ def get_crop_modal_html(lang: str) -> str:
     template = """
 <style>
 #crop-modal-overlay {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center; }}
-#crop-modal {{ background: white; border-radius: 12px; padding: 20px; max-width: 90vw; max-height: 90vh; overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3); }}
-.crop-modal-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }}
-.crop-modal-header h3 {{ margin: 0; color: #333; }}
-.crop-modal-close {{ background: none; border: none; font-size: 24px; cursor: pointer; color: #666; }}
-.crop-modal-close:hover {{ color: #333; }}
+#crop-modal {{ background: var(--background-fill-primary, white); border-radius: 12px; padding: 20px; max-width: 90vw; max-height: 90vh; overflow: auto; box-shadow: 0 10px 40px rgba(0,0,0,0.3); }}
+.crop-modal-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color-primary, #eee); }}
+.crop-modal-header h3 {{ margin: 0; color: var(--body-text-color, #333); }}
+.crop-modal-close {{ background: none; border: none; font-size: 24px; cursor: pointer; color: var(--body-text-color-subdued, #666); }}
+.crop-modal-close:hover {{ color: var(--body-text-color, #333); }}
 .crop-image-container {{ max-width: 800px; max-height: 500px; margin: 0 auto; }}
 .crop-image-container img {{ max-width: 100%; display: block; }}
-.crop-info-bar {{ display: flex; justify-content: space-between; align-items: center; margin: 15px 0; padding: 10px; background: #f5f5f5; border-radius: 6px; font-size: 14px; }}
+.crop-info-bar {{ display: flex; justify-content: space-between; align-items: center; margin: 15px 0; padding: 10px; background: var(--background-fill-secondary, #f5f5f5); border-radius: 6px; font-size: 14px; color: var(--body-text-color, #333); }}
 .crop-inputs {{ display: flex; gap: 15px; margin: 15px 0; flex-wrap: wrap; }}
 .crop-input-group {{ display: flex; flex-direction: column; gap: 5px; }}
-.crop-input-group label {{ font-size: 12px; color: #666; }}
-.crop-input-group input {{ width: 80px; padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }}
-.crop-modal-buttons {{ display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px; padding-top: 15px; border-top: 1px solid #eee; }}
+.crop-input-group label {{ font-size: 12px; color: var(--body-text-color-subdued, #666); }}
+.crop-input-group input {{ width: 80px; padding: 8px; border: 1px solid var(--border-color-primary, #ddd); background: var(--background-fill-primary, white); color: var(--body-text-color, #333); border-radius: 4px; font-size: 14px; }}
+.crop-modal-buttons {{ display: flex; gap: 10px; justify-content: flex-end; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color-primary, #eee); }}
 .crop-btn {{ padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.2s; }}
-.crop-btn-secondary {{ background: #f0f0f0; color: #333; }}
-.crop-btn-secondary:hover {{ background: #e0e0e0; }}
+.crop-btn-secondary {{ background: var(--background-fill-secondary, #f0f0f0); color: var(--body-text-color, #333); }}
+.crop-btn-secondary:hover {{ background: var(--background-fill-tertiary, #e0e0e0); }}
 .crop-btn-primary {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }}
 .crop-btn-primary:hover {{ opacity: 0.9; }}
 </style>
@@ -99,6 +99,29 @@ CROP_MODAL_JS = """
     overflow: hidden !important;
     opacity: 0 !important;
     visibility: hidden !important;
+}
+
+/* Hidden textbox triggers - small but still in DOM flow for Gradio events */
+.hidden-textbox-trigger {
+    height: 1px !important;
+    min-height: 1px !important;
+    max-height: 1px !important;
+    overflow: hidden !important;
+    opacity: 0.01 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    position: absolute !important;
+    left: -9999px !important;
+}
+.hidden-textbox-trigger textarea,
+.hidden-textbox-trigger input,
+.hidden-textbox-trigger button {
+    height: 1px !important;
+    min-height: 1px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
 }
 </style>
 <script>
@@ -226,6 +249,132 @@ window.confirmCrop = function() {
 };
 
 console.log('Crop modal JS loaded, openCropModal:', typeof window.openCropModal);
+
+// ═══════════════════════════════════════════════════════════════
+// Color Palette Click Handler (Global - survives Gradio re-renders)
+// ═══════════════════════════════════════════════════════════════
+
+(function() {
+    // LUT color search filter function (called from oninput attribute)
+    window.filterLutColors = function(searchValue) {
+        var query = searchValue.toLowerCase().replace('#', '');
+        var containers = document.querySelectorAll('.lut-color-swatch-container');
+        var visibleCount = 0;
+        containers.forEach(function(container) {
+            var swatch = container.querySelector('.lut-color-swatch');
+            if (swatch) {
+                var color = swatch.getAttribute('data-color').toLowerCase().replace('#', '');
+                if (query === '' || color.includes(query)) {
+                    container.style.display = 'flex';
+                    visibleCount++;
+                } else {
+                    container.style.display = 'none';
+                }
+            }
+        });
+        var countEl = document.getElementById('lut-color-visible-count');
+        if (countEl) countEl.textContent = visibleCount;
+    };
+    
+    // Helper function to update Gradio textbox
+    function updateGradioTextbox(elemId, value) {
+        var container = document.querySelector('#' + elemId);
+        if (!container) {
+            console.warn('[Palette] Container not found:', elemId);
+            return false;
+        }
+        var input = container.querySelector('textarea, input[type="text"], input');
+        if (input) {
+            var nativeSetter = Object.getOwnPropertyDescriptor(
+                input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 
+                'value'
+            );
+            if (nativeSetter && nativeSetter.set) {
+                nativeSetter.set.call(input, value);
+            } else {
+                input.value = value;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            console.log('[Palette] Updated textbox:', elemId, 'with value:', value);
+            return true;
+        }
+        console.warn('[Palette] Input not found in container:', elemId);
+        return false;
+    }
+    
+    // Handle palette swatch click
+    function handlePaletteSwatchClick(e) {
+        var swatch = e.target.closest('.palette-swatch');
+        if (!swatch) return;
+        
+        var hexColor = swatch.getAttribute('data-color');
+        if (!hexColor) return;
+        
+        console.log('[Palette] Color clicked:', hexColor);
+        
+        // Update hidden textboxes
+        updateGradioTextbox('conv-color-selected-hidden', hexColor);
+        updateGradioTextbox('conv-highlight-color-hidden', hexColor);
+        
+        // Update visual selection
+        document.querySelectorAll('.palette-swatch').forEach(function(el) {
+            el.style.outline = 'none';
+            el.style.outlineOffset = '0px';
+        });
+        swatch.style.outline = '3px solid #2196F3';
+        swatch.style.outlineOffset = '2px';
+        
+        // Click hidden buttons to trigger Gradio callbacks
+        setTimeout(function() {
+            window.clickGradioButton('conv-color-trigger-btn');
+            window.clickGradioButton('conv-highlight-trigger-btn');
+        }, 50);
+    }
+    
+    // Handle LUT color swatch click
+    function handleLutSwatchClick(e) {
+        var swatch = e.target.closest('.lut-color-swatch');
+        if (!swatch) return;
+        
+        var hexColor = swatch.getAttribute('data-color');
+        if (!hexColor) return;
+        
+        console.log('[LUT] Color clicked:', hexColor);
+        
+        // Update hidden textbox
+        updateGradioTextbox('conv-lut-color-selected-hidden', hexColor);
+        
+        // Update visual selection
+        document.querySelectorAll('.lut-color-swatch').forEach(function(el) {
+            el.style.outline = 'none';
+            el.style.outlineOffset = '0px';
+        });
+        swatch.style.outline = '3px solid #2196F3';
+        swatch.style.outlineOffset = '2px';
+        
+        // Click hidden button to trigger Gradio callback
+        setTimeout(function() {
+            window.clickGradioButton('conv-lut-color-trigger-btn');
+        }, 50);
+    }
+    
+    // Use event delegation on document body - this survives Gradio re-renders
+    document.addEventListener('click', function(e) {
+        // Check for palette swatch
+        if (e.target.closest('.palette-swatch')) {
+            handlePaletteSwatchClick(e);
+            return;
+        }
+        // Check for LUT swatch
+        if (e.target.closest('.lut-color-swatch')) {
+            handleLutSwatchClick(e);
+            return;
+        }
+    }, true);  // Use capture phase to ensure we get the event first
+    
+    console.log('[Palette] Global click handler installed');
+})();
 </script>
 """
 
