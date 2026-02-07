@@ -416,7 +416,14 @@ def generate_8color_board(page_index=0):
         path = os.path.join("assets", "smart_8color_stacks.npy")
         if not os.path.exists(path): path = os.path.join("..", "assets", "smart_8color_stacks.npy")
         all_stacks = np.load(path)
-    except: return None, None, "❌ Data not found. Run analyze_colors.py first."
+        print(f"[8COLOR] Loaded {len(all_stacks)} stacks from {path}")
+        
+        # Debug: Check surface black count
+        surface_black = sum(1 for s in all_stacks if s[4] == 5)
+        print(f"[8COLOR] Surface black: {surface_black}/{len(all_stacks)} ({surface_black/len(all_stacks)*100:.2f}%)")
+    except Exception as e: 
+        print(f"[8COLOR] Error loading data: {e}")
+        return None, None, "❌ Data not found. Run analyze_colors.py first."
 
     # 2. Slice Data (1369 per page for 37x37)
     per_page = 1369
@@ -438,7 +445,14 @@ def generate_8color_board(page_index=0):
     for i, stack in enumerate(stacks):
         r, c = (i // data_dim) + padding, (i % data_dim) + padding
         py, px = r * (px_blk + px_gap), c * (px_blk + px_gap)
+        
+        # Debug first few stacks
+        if i < 3:
+            print(f"[8COLOR] Stack {i}: {stack} -> reversed: {stack[::-1]}")
+        
         # Reverse stack for Face Down
+        # stack[0] = Layer 5 (背面) -> Z=4 (物理第5层)
+        # stack[4] = Layer 1 (正面) -> Z=0 (物理第1层，观赏面)
         for z, mid in enumerate(stack[::-1]):
             full_matrix[z, py:py+px_blk, px:px+px_blk] = mid
 
@@ -475,6 +489,24 @@ def generate_8color_board(page_index=0):
     # Simple preview generation
     prev = np.zeros((v_w, v_w, 3), dtype=np.uint8)
     for mid, col in conf['preview'].items(): prev[full_matrix[0]==mid] = col[:3]
+    
+    # Debug: Check what's on the first layer
+    unique, counts = np.unique(full_matrix[0], return_counts=True)
+    material_stats = dict(zip(unique, counts))
+    print(f"[8COLOR] First layer (Z=0) materials: {material_stats}")
+    
+    # Calculate actual color blocks (not pixels)
+    total_pixels = v_w * v_w
+    block_pixels = px_blk * px_blk
+    print(f"[8COLOR] Pixel stats:")
+    print(f"  Total pixels: {total_pixels}")
+    print(f"  Pixels per block: {block_pixels}")
+    for mid, pixel_count in material_stats.items():
+        block_count = pixel_count / block_pixels
+        percentage = pixel_count / total_pixels * 100
+        mat_name = conf['slots'][mid] if mid < len(conf['slots']) else f"Material{mid}"
+        print(f"  {mat_name} (ID={mid}): {pixel_count} pixels = ~{block_count:.1f} blocks ({percentage:.1f}%)")
+    
     return out_path, Image.fromarray(prev), "OK"
 
 def generate_8color_batch_zip():

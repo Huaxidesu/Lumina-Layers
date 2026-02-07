@@ -410,6 +410,13 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                         new_h = max(1, int(h * scale))
                         preview_rgba = cv2.resize(preview_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+                    # Fix black background issue: ensure transparent areas have white RGB
+                    # This prevents black borders when displaying in UI
+                    alpha_channel = preview_rgba[:, :, 3]
+                    transparent_mask = alpha_channel == 0
+                    if np.any(transparent_mask):
+                        preview_rgba[transparent_mask, :3] = 255  # Set RGB to white for transparent pixels
+                    
                     preview_img = preview_rgba
                     print("[CONVERTER] ✅ Generated 2D vector preview")
                 except Exception as e:
