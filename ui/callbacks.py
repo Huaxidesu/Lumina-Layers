@@ -520,9 +520,12 @@ def run_extraction_wrapper(img, points, offset_x, offset_y, zoom, barrel, wb, br
         try:
             lut = np.load(lut_path)
             np.save(temp_path, lut)
+            # Return the assets path, not the original LUT_FILE_PATH
+            # This ensures manual corrections are saved to the correct location
+            print(f"[8-COLOR] Saved page {page_idx} to: {temp_path}")
             lut_path = temp_path
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[8-COLOR] Error saving page {page_idx}: {e}")
     
     return vis, prev, lut_path, status
 
@@ -532,14 +535,29 @@ def merge_8color_data():
     path1 = os.path.join("assets", "temp_8c_page_1.npy")
     path2 = os.path.join("assets", "temp_8c_page_2.npy")
     
+    print(f"[MERGE_8COLOR] Looking for page 1: {path1}")
+    print(f"[MERGE_8COLOR] Looking for page 2: {path2}")
+    print(f"[MERGE_8COLOR] Page 1 exists: {os.path.exists(path1)}")
+    print(f"[MERGE_8COLOR] Page 2 exists: {os.path.exists(path2)}")
+    
     if not os.path.exists(path1) or not os.path.exists(path2):
         return None, "❌ Missing temp pages. Please extract Page 1 and Page 2 first."
     
     try:
         lut1 = np.load(path1)
         lut2 = np.load(path2)
+        print(f"[MERGE_8COLOR] Page 1 shape: {lut1.shape}")
+        print(f"[MERGE_8COLOR] Page 2 shape: {lut2.shape}")
+        
         merged = np.concatenate([lut1, lut2], axis=0)
+        print(f"[MERGE_8COLOR] Merged shape: {merged.shape}")
+        
         np.save(LUT_FILE_PATH, merged)
+        print(f"[MERGE_8COLOR] Saved merged LUT to: {LUT_FILE_PATH}")
+        
         return LUT_FILE_PATH, "✅ 8-Color LUT merged and saved!"
     except Exception as e:
+        print(f"[MERGE_8COLOR] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return None, f"❌ Merge failed: {e}"

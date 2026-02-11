@@ -8,7 +8,7 @@
 
 ## 项目状态
 
-**当前版本**: v1.5.5  
+**当前版本**: v1.5.6  
 **协议**: CC BY-NC-SA 4.0（附商业豁免条款）  
 **性质**: 非营利性独立实现，开源社区项目
 
@@ -283,7 +283,23 @@ git clone https://github.com/MOVIBALE/Lumina-Layers.git
 cd Lumina-Layers
 ```
 
-### 安装依赖
+### 选项 1：Docker (推荐)
+
+使用 Docker 是运行 Lumina Studio 最简单的方法，无需担心系统级依赖项（如 `cairo` 或 `pkg-config`）。
+
+1. **构建镜像**：
+   ```bash
+   docker build -t lumina-layers .
+   ```
+
+2. **运行容器**：
+   ```bash
+   docker run -p 7860:7860 lumina-layers
+   ```
+
+3. 在浏览器中打开 `http://localhost:7860`。
+
+### 选项 2：本地安装
 
 **基础依赖**（必需）：
 ```bash

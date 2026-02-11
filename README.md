@@ -8,7 +8,7 @@ Physics-Based Multi-Material FDM Color System
 
 ## Project Status
 
-**Current Version**: v1.5.5  
+**Current Version**: v1.5.6  
 **License**: CC BY-NC-SA 4.0 (with Commercial Exemption)  
 **Nature**: Non-profit independent implementation, open-source community project
 
@@ -134,6 +134,25 @@ Converts images into printable 3D models using calibrated data.
 - **Structure Options**: Double-sided (keychain) or Single-sided (relief) modes
 - **Smart Background Removal**: Automatic transparency detection with adjustable tolerance
 - **Correct 3MF Naming**: Objects are named by color (e.g., "Cyan", "Magenta") instead of "geometry_0" for easy slicer identification
+
+---
+
+## What's New in v1.5.6 🚀
+
+### LUT Merging with Stacking Preservation
+
+- 🎨 **Merged LUT Support** - Combine multiple LUTs (8-color + 6-color + 4-color + BW) to expand color gamut
+- 📦 **Stacking Information Preservation** - Merged LUTs now preserve original stacking data from calibration prints
+- 🔄 **NPZ Format** - Merged LUTs saved as `.npz` files containing both colors and stacking arrays
+- 🎯 **Intelligent Reconstruction** - Automatic stacking reconstruction for all LUT types (BW/4-color/6-color/8-color)
+- 🖼️ **Color Replacement Support** - Merged LUTs fully compatible with color replacement feature
+- 📤 **Upload Support** - All file upload components now accept both `.npy` and `.npz` formats
+
+### Technical Improvements
+
+- ✅ **Multi-Object 3MF Export** - Merged LUTs now correctly export separate objects for each material
+- 🔍 **Format Auto-Detection** - System automatically detects and loads `.npy` or `.npz` format
+- 🏷️ **Visual Indicators** - Merged LUTs display `[Merged]` tag in dropdown for easy identification
 
 ---
 
@@ -293,7 +312,23 @@ git clone https://github.com/MOVIBALE/Lumina-Layers.git
 cd Lumina-Layers
 ```
 
-### Install dependencies
+### Option 1: Docker (Recommended)
+
+Using Docker is the easiest way to run Lumina Studio without worrying about system-level dependencies (like `cairo` or `pkg-config`).
+
+1. **Build the image**:
+   ```bash
+   docker build -t lumina-layers .
+   ```
+
+2. **Run the container**:
+   ```bash
+   docker run -p 7860:7860 lumina-layers
+   ```
+
+3. Open your browser to `http://localhost:7860`.
+
+### Option 2: Local Installation
 
 **Core dependencies** (required):
 ```bash

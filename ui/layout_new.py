@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image as PILImage
 
 from core.i18n import I18n
-from config import ColorSystem
+from config import ColorSystem, ModelingMode
 from utils import Stats, LUTManager
 from core.calibration import generate_calibration_board, generate_smart_board, generate_8color_batch_zip
 from core.extractor import (
@@ -601,58 +601,22 @@ def _preview_update(img):
     return gr.update(value=_scale_preview_image(img))
 
 
-# ---------- Mode mapping ----------
-
-def map_modeling_mode(mode_display_text):
-    """Map UI modeling mode label to internal mode identifier.
-
-    Args:
-        mode_display_text: Label from UI (e.g. "High-Fidelity", "Pixel", "Vector").
-
-    Returns:
-        str: One of "high-fidelity", "pixel", "vector_native".
-    """
-    mode_lower = (mode_display_text or "").lower()
-    if "vector" in mode_lower or "svg" in mode_lower or "矢量" in mode_lower or "向量" in mode_lower:
-        return "vector_native"
-    if "pixel" in mode_lower or "像素" in mode_lower:
-        return "pixel"
-    return "high-fidelity"
-
-
-def generate_final_model_with_mapping(image_path, lut_path, target_width_mm, spacer_thick,
-                                      structure_mode, auto_bg, bg_tol, color_mode,
-                                      add_loop, loop_width, loop_length, loop_hole, loop_pos,
-                                      modeling_mode_display, quantize_colors, color_replacements=None):
-    """Run final model generation with UI mode label mapped to internal mode.
-
-    Returns:
-        tuple: (out_path, glb_path, preview_img, status_msg) from generate_final_model.
-    """
-    modeling_mode = map_modeling_mode(modeling_mode_display)
-    return generate_final_model(
-        image_path, lut_path, target_width_mm, spacer_thick,
-        structure_mode, auto_bg, bg_tol, color_mode,
-        add_loop, loop_width, loop_length, loop_hole, loop_pos,
-        modeling_mode, quantize_colors, color_replacements
-    )
-
-
 def process_batch_generation(batch_files, is_batch, single_image, lut_path, target_width_mm,
                              spacer_thick, structure_mode, auto_bg, bg_tol, color_mode,
                              add_loop, loop_width, loop_length, loop_hole, loop_pos,
-                             modeling_mode_display, quantize_colors, color_replacements=None, progress=gr.Progress()):
+                             modeling_mode, quantize_colors, color_replacements=None, progress=gr.Progress()):
     """Dispatch to single-image or batch generation; batch writes a ZIP of 3MFs.
 
     Returns:
         tuple: (file_or_zip_path, model3d_value, preview_image, status_text).
     """
+    modeling_mode = ModelingMode(modeling_mode)
     args = (lut_path, target_width_mm, spacer_thick, structure_mode, auto_bg, bg_tol,
             color_mode, add_loop, loop_width, loop_length, loop_hole, loop_pos,
-            modeling_mode_display, quantize_colors, color_replacements)
+            modeling_mode, quantize_colors, color_replacements)
 
     if not is_batch:
-        out_path, glb_path, preview_img, status = generate_final_model_with_mapping(single_image, *args)
+        out_path, glb_path, preview_img, status = generate_final_model(single_image, *args)
         return out_path, glb_path, _preview_update(preview_img), status
 
     if not batch_files:
@@ -676,7 +640,7 @@ def process_batch_generation(batch_files, is_batch, single_image, lut_path, targ
         logs.append(f"[{i+1}/{total_files}] 正在生成: {filename}")
 
         try:
-            result_3mf, _, _, _ = generate_final_model_with_mapping(path, *args)
+            result_3mf, _, _, _ = generate_final_model(path, *args)
 
             if result_3mf and os.path.exists(result_3mf):
                 new_name = os.path.splitext(filename)[0] + ".3mf"
@@ -695,6 +659,9 @@ def process_batch_generation(batch_files, is_batch, single_image, lut_path, targ
         logs.append(f"✅ Batch done: {len(generated_files)} model(s).")
         return zip_path, None, _preview_update(None), "\n".join(logs)
     return None, None, _preview_update(None), "❌ Batch failed: no valid models.\n" + "\n".join(logs)
+
+
+# ========== Advanced Tab Callbacks ==========
 
 
 def create_app():
@@ -748,7 +715,12 @@ def create_app():
                 components.update(ext_components)
             tab_components['tab_extractor'] = tab_ext
             
-            with gr.TabItem(label=I18n.get('tab_about', "zh"), id=3) as tab_about:
+            with gr.TabItem(label="🔬 高级 | Advanced", id=3) as tab_advanced:
+                advanced_components = create_advanced_tab_content("zh")
+                components.update(advanced_components)
+            tab_components['tab_advanced'] = tab_advanced
+            
+            with gr.TabItem(label=I18n.get('tab_about', "zh"), id=4) as tab_about:
                 about_components = create_about_tab_content("zh")
                 components.update(about_components)
             tab_components['tab_about'] = tab_about
@@ -771,6 +743,7 @@ def create_app():
             updates.append(gr.update(label=I18n.get('tab_converter', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_calibration', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_extractor', new_lang)))
+            updates.append(gr.update(label="🔬 高级 | Advanced" if new_lang == "zh" else "🔬 Advanced"))
             updates.append(gr.update(label=I18n.get('tab_about', new_lang)))
             updates.extend(_get_all_component_updates(new_lang, components))
             updates.append(gr.update(value=_get_footer_html(new_lang)))
@@ -785,6 +758,7 @@ def create_app():
             tab_components['tab_converter'],
             tab_components['tab_calibration'],
             tab_components['tab_extractor'],
+            tab_components['tab_advanced'],
             tab_components['tab_about'],
         ]
         output_list.extend(_get_component_list(components))
@@ -853,6 +827,10 @@ def create_app():
             )
             return status_msg, _get_stats_html(lang, new_stats)
 
+        # ========== Advanced Tab Events ==========
+        # (No events currently)
+
+        # ========== About Tab Events ==========
         components['btn_clear_cache'].click(
             fn=on_clear_cache,
             inputs=[lang_state],
@@ -976,7 +954,9 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                     choices=[
                         (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                         (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)")
+                        ("BW (Black & White)", "BW (Black & White)"),
+                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
+                        ("8-Color Max", "8-Color Max")
                     ]
                 ))
             elif choice_key == 'conv_structure':
@@ -992,9 +972,9 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                     label=I18n.get(choice_key, lang),
                     info=I18n.get('conv_modeling_mode_info', lang),
                     choices=[
-                        (I18n.get('conv_modeling_mode_hifi', lang), I18n.get('conv_modeling_mode_hifi', 'en')),
-                        (I18n.get('conv_modeling_mode_pixel', lang), I18n.get('conv_modeling_mode_pixel', 'en')),
-                        (I18n.get('conv_modeling_mode_vector', lang), I18n.get('conv_modeling_mode_vector', 'en'))
+                        (I18n.get('conv_modeling_mode_hifi', lang), ModelingMode.HIGH_FIDELITY),
+                        (I18n.get('conv_modeling_mode_pixel', lang), ModelingMode.PIXEL),
+                        (I18n.get('conv_modeling_mode_vector', lang), ModelingMode.VECTOR)
                     ]
                 ))
             else:
@@ -1069,11 +1049,12 @@ def _get_component_list(components: dict) -> list:
 def get_extractor_reference_image(mode_str):
     """Load or generate reference image for color extractor (disk-cached).
 
-    Uses assets/ with filenames ref_6color_smart.png, ref_cmyw_standard.png,
-    or ref_rybw_standard.png. Generates via calibration board logic if missing.
+    Uses assets/ with filenames ref_bw_standard.png, ref_cmyw_standard.png,
+    ref_rybw_standard.png, ref_6color_smart.png, or ref_8color_smart.png.
+    Generates via calibration board logic if missing.
 
     Args:
-        mode_str: Color mode label (e.g. "6-Color", "CMYW", "RYBW").
+        mode_str: Color mode label (e.g. "BW", "CMYW", "RYBW", "6-Color", "8-Color").
 
     Returns:
         PIL.Image.Image | None: Reference image or None on error.
@@ -1082,13 +1063,24 @@ def get_extractor_reference_image(mode_str):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
 
-    if "6-Color" in mode_str or "1296" in mode_str:
+    # Determine filename and generation mode based on color system
+    if "8-Color" in mode_str:
+        filename = "ref_8color_smart.png"
+        gen_mode = "8-Color"
+    elif "6-Color" in mode_str or "1296" in mode_str:
         filename = "ref_6color_smart.png"
         gen_mode = "6-Color"
     elif "CMYW" in mode_str:
         filename = "ref_cmyw_standard.png"
         gen_mode = "CMYW"
+    elif "RYBW" in mode_str:
+        filename = "ref_rybw_standard.png"
+        gen_mode = "RYBW"
+    elif "BW" in mode_str or "Black" in mode_str:
+        filename = "ref_bw_standard.png"
+        gen_mode = "BW"
     else:
+        # Default to RYBW
         filename = "ref_rybw_standard.png"
         gen_mode = "RYBW"
 
@@ -1107,9 +1099,15 @@ def get_extractor_reference_image(mode_str):
         gap = 0
         backing = "White"
 
-        if gen_mode == "6-Color":
+        if gen_mode == "8-Color":
+            from core.calibration import generate_8color_board
+            _, img, _ = generate_8color_board(0)  # Page 1
+        elif gen_mode == "6-Color":
             from core.calibration import generate_smart_board
             _, img, _ = generate_smart_board(block_size, gap)
+        elif gen_mode == "BW":
+            from core.calibration import generate_bw_calibration_board
+            _, img, _ = generate_bw_calibration_board(block_size, gap, backing)
         else:
             from core.calibration import generate_calibration_board
             _, img, _ = generate_calibration_board(gen_mode, block_size, gap, backing)
@@ -1259,9 +1257,11 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
             with gr.Row(elem_classes=["compact-row"]):
                 components['radio_conv_color_mode'] = gr.Radio(
                     choices=[
+                        ("BW (Black & White)", "BW (Black & White)"),
                         (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                         (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)")
+                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
+                        ("8-Color Max", "8-Color Max")
                     ],
                     value=I18n.get('conv_color_mode_rybw', 'en'),
                     label=I18n.get('conv_color_mode', lang)
@@ -1279,11 +1279,11 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
             with gr.Row(elem_classes=["compact-row"]):
                 components['radio_conv_modeling_mode'] = gr.Radio(
                     choices=[
-                        (I18n.get('conv_modeling_mode_hifi', lang), I18n.get('conv_modeling_mode_hifi', 'en')),
-                        (I18n.get('conv_modeling_mode_pixel', lang), I18n.get('conv_modeling_mode_pixel', 'en')),
-                        (I18n.get('conv_modeling_mode_vector', lang), I18n.get('conv_modeling_mode_vector', 'en'))
+                        (I18n.get('conv_modeling_mode_hifi', lang), ModelingMode.HIGH_FIDELITY),
+                        (I18n.get('conv_modeling_mode_pixel', lang), ModelingMode.PIXEL),
+                        (I18n.get('conv_modeling_mode_vector', lang), ModelingMode.VECTOR)
                     ],
-                    value=I18n.get('conv_modeling_mode_hifi', 'en'),
+                    value=ModelingMode.HIGH_FIDELITY,
                     label=I18n.get('conv_modeling_mode', lang),
                     info=I18n.get('conv_modeling_mode_info', lang),
                     elem_classes=["vertical-radio"],
@@ -1996,6 +1996,7 @@ def create_calibration_tab_content(lang: str) -> dict:
                 
             components['radio_cal_color_mode'] = gr.Radio(
                 choices=[
+                    ("BW (Black & White)", "BW (Black & White)"),
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
@@ -2052,8 +2053,12 @@ def create_calibration_tab_content(lang: str) -> dict:
         if "6-Color" in color_mode:
             # Call Smart 1296 generator
             return generate_smart_board(block_size, gap)
+        if color_mode == "BW (Black & White)":
+            # Call BW generator (exact match to avoid matching RYBW)
+            from core.calibration import generate_bw_calibration_board
+            return generate_bw_calibration_board(block_size, gap, backing)
         else:
-            # Call traditional 4-color generator
+            # Call traditional 4-color generator (CMYW or RYBW)
             return generate_calibration_board(color_mode, block_size, gap, backing)
     
     cal_event = components['btn_cal_generate_btn'].click(
@@ -2093,6 +2098,7 @@ def create_extractor_tab_content(lang: str) -> dict:
                 
             components['radio_ext_color_mode'] = gr.Radio(
                 choices=[
+                    ("BW (Black & White)", "BW (Black & White)"),
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
@@ -2123,7 +2129,7 @@ def create_extractor_tab_content(lang: str) -> dict:
             with gr.Row():
                 components['checkbox_ext_wb'] = gr.Checkbox(
                     label=I18n.get('ext_wb', lang),
-                    value=True
+                    value=False
                 )
                 components['checkbox_ext_vignette'] = gr.Checkbox(
                     label=I18n.get('ext_vignette', lang),
@@ -2301,6 +2307,16 @@ def create_extractor_tab_content(lang: str) -> dict:
     
     return components
 
+
+
+def create_advanced_tab_content(lang: str) -> dict:
+    """Build Advanced tab content for LUT merging. Returns component dict."""
+    components = {}
+    
+    # Title and description
+    components['md_advanced_title'] = gr.Markdown("### 🔬 高级功能 | Advanced Features" if lang == 'zh' else "### 🔬 Advanced Features")
+    
+    return components
 
 
 def create_about_tab_content(lang: str) -> dict:
