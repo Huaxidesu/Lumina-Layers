@@ -20,19 +20,50 @@ jobs:
 
       - name: Sync and Merge from Upstream
         id: sync
+        shell: bash
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-          git remote add upstream https://github.com/MOVIBALE/Lumina-Layers.git
-          git fetch upstream
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git merge upstream/main --allow-unrelated-histories -m "Sync from upstream"; then
-            echo "has_updated=true" >> $GITHUB_OUTPUT
-            git push origin main
+          BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+
+          # Upstream remote
+          git remote add upstream https://github.com/MOVIBALE/Lumina-Layers.git 2>/dev/null || true
+          git fetch --prune upstream
+
+          # Detect upstream default branch (avoid hardcoding main/master)
+          UPSTREAM_BRANCH="$(git remote show upstream | sed -n 's/.*HEAD branch: //p' | head -n 1)"
+          UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
+          echo "Upstream default branch: ${UPSTREAM_BRANCH}"
+
+          # Keep local docker files during merge (prevents frequent conflicts)
+          if [ ! -f .gitattributes ]; then
+            printf '%s\n' \
+              'Dockerfile merge=ours' \
+              'docker-compose.yml merge=ours' > .gitattributes
+            git add .gitattributes
+            git commit -m "chore: keep local docker files on upstream sync" || true
+          fi
+          git config merge.ours.driver true
+
+          before="$(git rev-parse HEAD)"
+
+          # Merge upstream
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || {
+            echo "Merge failed. Conflicts:"
+            git status --porcelain
+            exit 1
+          }
+
+          after="$(git rev-parse HEAD)"
+
+          if [ "$before" != "$after" ]; then
+            echo "has_updated=true" >> "$GITHUB_OUTPUT"
+            git push origin "HEAD:${BRANCH}"
           else
-            echo "合并冲突或无更新"
-            echo "has_updated=false" >> $GITHUB_OUTPUT
+            echo "has_updated=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up Docker Buildx
