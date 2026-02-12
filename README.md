@@ -8,7 +8,7 @@ Physics-Based Multi-Material FDM Color System
 
 ## Project Status
 
-**Current Version**: v1.5.6  
+**Current Version**: v1.5.7  
 **License**: CC BY-NC-SA 4.0 (with Commercial Exemption)  
 **Nature**: Non-profit independent implementation, open-source community project
 
@@ -150,7 +150,7 @@ Converts images into printable 3D models using calibrated data.
 
 ---
 
-## What's New in v1.5.6 🚀
+## What's New in v1.5.7 🚀
 
 ### 6-Color and 8-Color Mode Support
 
@@ -410,13 +410,13 @@ This launches the web interface with all three modules in tabs.
 4. Upload your photo
 5. Click the four corner blocks in order (colors vary by mode):
 
-| Mode | Corner 1 (TL) | Corner 2 (TR) | Corner 3 (BR) | Corner 4 (BL) |
-|------|---------------|---------------|---------------|---------------|
-| 4-Color RYBW | ⬜ White | 🟥 Red | 🟦 Blue | 🟨 Yellow |
-| 4-Color CMYW | ⬜ White | 🔵 Cyan | 🟣 Magenta | 🟨 Yellow |
-| 6-Color | ⬜ White | 🔵 Cyan | 🟣 Magenta | 🟨 Yellow |
-| 8-Color | ⬜ White | 🟡 Yellow | ⬛ Black | 🟨 Cyan |
-| BW | ⬜ White | ⬛ Black | ⬛ Black | ⬛ Black |
+| Mode | ⬜ White Top-Left | Top-Right | Bottom-Right | Bottom-Left |
+|------|------------------|-----------|--------------|-------------|
+| 4-Color RYBW | ⬜ White | Red | Blue | Yellow |
+| 4-Color CMYW | ⬜ White | Cyan | Magenta | Yellow |
+| 6-Color | ⬜ White | Cyan | Magenta | Yellow |
+| 8-Color | ⬜ White | Yellow | Black | Cyan |
+| BW | ⬜ White | Black | Black | Black |
 
 6. Adjust correction sliders if needed (white balance OFF by default, vignette, distortion)
 7. Click **Extract** 

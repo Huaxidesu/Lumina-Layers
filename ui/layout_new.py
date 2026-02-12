@@ -1076,7 +1076,7 @@ def get_extractor_reference_image(mode_str):
     elif "RYBW" in mode_str:
         filename = "ref_rybw_standard.png"
         gen_mode = "RYBW"
-    elif "BW" in mode_str or "Black" in mode_str:
+    elif mode_str == "BW (Black & White)" or mode_str == "BW":
         filename = "ref_bw_standard.png"
         gen_mode = "BW"
     else:

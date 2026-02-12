@@ -137,7 +137,7 @@ class ColorSystem:
         if "CMYW" in mode:
             return ColorSystem.CMYW
         # Check BW last to avoid matching RYBW
-        if mode == "BW" or ("Black" in mode and "White" in mode and "RY" not in mode):
+        if mode == "BW" or mode == "BW (Black & White)":
             return ColorSystem.BW
         return ColorSystem.RYBW  # Default fallback
 

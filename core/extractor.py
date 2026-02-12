@@ -64,7 +64,7 @@ def draw_corner_points(img, points, color_mode: str):
     color_conf = ColorSystem.get(color_mode)
     labels = color_conf['corner_labels']
 
-    if "BW" in color_mode or ("Black" in color_mode and "White" in color_mode):
+    if color_mode == "BW (Black & White)" or color_mode == "BW":
         draw_colors = [
             (255, 255, 255),  # White (TL)
             (0, 0, 0),        # Black (TR)
@@ -168,7 +168,7 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, co
         return None, None, None, "❌ 请点击4个角点"
     
     # 动态确定网格大小
-    if "BW" in color_mode or "Black" in color_mode and "White" in color_mode:
+    if color_mode == "BW (Black & White)" or color_mode == "BW":
         grid_size = 6           # Data: 6x6 (32色，只用前32个)
         physical_grid = 8       # Physical: 8x8 (含边框)
         total_cells = 32
@@ -208,7 +208,7 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, co
     vis = warped.copy()
 
     # BW模式特殊处理：只提取前32个色块
-    if "BW" in color_mode or ("Black" in color_mode and "White" in color_mode):
+    if color_mode == "BW (Black & White)" or color_mode == "BW":
         cells_to_extract = 32
     else:
         cells_to_extract = grid_size * grid_size

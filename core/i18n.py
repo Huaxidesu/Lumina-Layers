@@ -715,7 +715,7 @@ class I18n:
 
 ---
 
-### 📝 v1.5.6 更新日志
+### 📝 v1.5.7 更新日志
 
 #### 🔧 8色模式叠色效果修复
 - **核心修复**：修复8色模式图像转换时堆叠顺序错误导致的叠色效果不正确
@@ -869,7 +869,7 @@ Accurate color reproduction for FDM printing
 
 ---
 
-### 📝 v1.5.6 Changelog
+### 📝 v1.5.7 Changelog
 
 #### 🔧 8-Color Mode Stacking Fix
 - **Core Fix**: Fixed incorrect stacking order in 8-color image conversion causing wrong color layering

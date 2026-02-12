@@ -173,7 +173,7 @@ class LuminaImageProcessor:
         print(f"[IMAGE_PROCESSOR] Loading LUT with {total_colors} points...")
         
         # Branch 0: 2-Color BW (32)
-        if "BW" in self.color_mode or total_colors == 32:
+        if self.color_mode == "BW (Black & White)" or self.color_mode == "BW" or total_colors == 32:
             print("[IMAGE_PROCESSOR] Detected 2-Color BW mode")
             
             # Generate all 32 combinations (2^5 = 32)
