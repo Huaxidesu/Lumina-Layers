@@ -30,7 +30,28 @@ MANIFEST
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# Keep our custom spec file
+# *.spec
+
+# PyInstaller build outputs
+build/
+dist/
+LuminaStudio_v*/
+
+# PyInstaller test script
+test_paths.py
+
+# Debug and test files
+run_debug.bat
+test.png
+
+# Release packages
+*.rar
+*.zip
+*.7z
+
+# Old version folders
+Lumina-Layers-*/
 
 # Installer logs
 pip-log.txt
@@ -219,24 +240,25 @@ output/.gradio_cache/
 # Lumina Studio Specific
 # ==========================================
 
-# 本地个人设置 (包含上次选择的 LUT 路径等)
+# 本地个人设置 (包含上次选择�?LUT 路径�?
 user_settings.json
 
 # 批量生成产生的压缩包
 outputs/*.zip
 
-# 核心输出目录 (保留目录结构，忽略具体文件)
+# 核心输出目录 (保留目录结构，忽略具体文�?
 outputs/*.3mf
 outputs/*.glb
 outputs/*.npy
 outputs/batch_*/
-
-# 自动生成的本地参考图缓存 (可选忽略，建议忽略)
-assets/ref_*.png
 
 # 指标统计文件
 lumina_stats.txt
 +lut-npy163623644576/Custom/*.npy
 .venv312/
 .venv*/
-lut-npyԤ��/Custom/*.npy
+
+
+# Kiro hooks
+.kiro/hooks/
+lut-npyԤ��/Custom/*.npy
