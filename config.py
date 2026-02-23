@@ -134,20 +134,42 @@ class ColorSystem:
 
     @staticmethod
     def get(mode: str):
+        """
+        Get color system configuration (Unified 4-Color Backend)
+        
+        Args:
+            mode: Color mode string (4-Color/6-Color/8-Color/BW)
+        
+        Returns:
+            Color system configuration dict
+        
+        Note:
+            4-Color mode defaults to RYBW palette.
+            CMYW and RYBW share the same processing pipeline.
+        """
         if mode is None:
             return ColorSystem.RYBW  # Default fallback
-        # Check specific patterns first (most specific to least specific)
+        
+        # Unified 4-Color mode (defaults to RYBW)
+        if mode == "4-Color" or "4-Color" in mode:
+            return ColorSystem.RYBW
+        
+        # Check specific patterns
         if "8-Color" in mode:
             return ColorSystem.EIGHT_COLOR
         if "6-Color" in mode:
             return ColorSystem.SIX_COLOR
+        
+        # Legacy support for old mode strings
         if "RYBW" in mode:
             return ColorSystem.RYBW
         if "CMYW" in mode:
             return ColorSystem.CMYW
+        
         # Check BW last to avoid matching RYBW
         if mode == "BW" or mode == "BW (Black & White)":
             return ColorSystem.BW
+        
         return ColorSystem.RYBW  # Default fallback
 
 # ========== Global Constants ==========

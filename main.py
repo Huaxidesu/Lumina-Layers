@@ -12,8 +12,6 @@ Main Entry Point
 
 import os
 import sys
-
-# Colormath compatibility with numpy 1.20+ (run before other imports).
 import numpy as np
 
 

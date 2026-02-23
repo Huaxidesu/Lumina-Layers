@@ -1177,9 +1177,8 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                 updates.append(gr.update(
                     label=I18n.get(choice_key, lang),
                     choices=[
-                        (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
-                        (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
                         ("BW (Black & White)", "BW (Black & White)"),
+                        ("4-Color (1024 colors)", "4-Color"),
                         ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                         ("8-Color Max", "8-Color Max")
                     ]
@@ -1305,6 +1304,10 @@ def get_extractor_reference_image(mode_str):
     elif "6-Color" in mode_str or "1296" in mode_str:
         filename = "ref_6color_smart.png"
         gen_mode = "6-Color"
+    elif "4-Color" in mode_str:
+        # Unified 4-Color mode defaults to RYBW
+        filename = "ref_rybw_standard.png"
+        gen_mode = "RYBW"
     elif "CMYW" in mode_str:
         filename = "ref_cmyw_standard.png"
         gen_mode = "CMYW"
@@ -1511,12 +1514,11 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 components['radio_conv_color_mode'] = gr.Radio(
                     choices=[
                         ("BW (Black & White)", "BW (Black & White)"),
-                        (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
-                        (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                        ("4-Color (1024 colors)", "4-Color"),
                         ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                         ("8-Color Max", "8-Color Max")
                     ],
-                    value=I18n.get('conv_color_mode_rybw', 'en'),
+                    value="4-Color",
                     label=I18n.get('conv_color_mode', lang)
                 )
                 
@@ -2264,12 +2266,11 @@ def create_calibration_tab_content(lang: str) -> dict:
             components['radio_cal_color_mode'] = gr.Radio(
                 choices=[
                     ("BW (Black & White)", "BW (Black & White)"),
-                    (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
-                    (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                    ("4-Color (1024 colors)", "4-Color"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
-                value=I18n.get('conv_color_mode_rybw', 'en'),
+                value="4-Color",
                 label=I18n.get('cal_color_mode', lang)
             )
                 
@@ -2325,8 +2326,9 @@ def create_calibration_tab_content(lang: str) -> dict:
             from core.calibration import generate_bw_calibration_board
             return generate_bw_calibration_board(block_size, gap, backing)
         else:
-            # Call traditional 4-color generator (CMYW or RYBW)
-            return generate_calibration_board(color_mode, block_size, gap, backing)
+            # Call traditional 4-color generator (unified for all 4-color modes)
+            # Default to RYBW palette
+            return generate_calibration_board("RYBW", block_size, gap, backing)
     
     cal_event = components['btn_cal_generate_btn'].click(
             generate_board_wrapper,
@@ -2354,7 +2356,7 @@ def create_extractor_tab_content(lang: str) -> dict:
     ext_state_img = gr.State(None)
     ext_state_pts = gr.State([])
     ext_curr_coord = gr.State(None)
-    default_mode = I18n.get('conv_color_mode_rybw', 'en')
+    default_mode = "4-Color"
     ref_img = get_extractor_reference_image(default_mode)
 
     with gr.Row():
@@ -2366,12 +2368,11 @@ def create_extractor_tab_content(lang: str) -> dict:
             components['radio_ext_color_mode'] = gr.Radio(
                 choices=[
                     ("BW (Black & White)", "BW (Black & White)"),
-                    (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
-                    (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                    ("4-Color (1024 colors)", "4-Color"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
-                value=I18n.get('conv_color_mode_rybw', 'en'),
+                value="4-Color",
                 label=I18n.get('ext_color_mode', lang)
             )
                 

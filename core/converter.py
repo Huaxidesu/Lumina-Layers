@@ -472,6 +472,9 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         )
     
     # ========== [EXISTING] Raster-based Processing ==========
+    # NOTE: CMYW and RYBW share 100% of the processing pipeline.
+    # Only difference is the LUT file and slot names from ColorSystem.get()
+    # All K-Means, layer slicing, and mesh generation logic is unified.
     
     color_conf = ColorSystem.get(color_mode)
     slot_names = color_conf['slots']
