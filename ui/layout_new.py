@@ -35,7 +35,8 @@ from core.converter import (
     on_preview_click_select_color,
     generate_lut_grid_html,
     detect_lut_color_mode,
-    detect_image_type
+    detect_image_type,
+    generate_auto_height_map
 )
 from .styles import CUSTOM_CSS
 from .callbacks import (
@@ -666,11 +667,14 @@ def process_batch_generation(batch_files, is_batch, single_image, lut_path, targ
                              spacer_thick, structure_mode, auto_bg, bg_tol, color_mode,
                              add_loop, loop_width, loop_length, loop_hole, loop_pos,
                              modeling_mode, quantize_colors, color_replacements=None,
-                             separate_backing=False, progress=gr.Progress()):
+                             separate_backing=False, enable_relief=False, color_height_map=None,
+                             progress=gr.Progress()):
     """Dispatch to single-image or batch generation; batch writes a ZIP of 3MFs.
 
     Args:
         separate_backing: Boolean flag to separate backing as individual object (default: False)
+        enable_relief: Boolean flag to enable 2.5D relief mode (default: False)
+        color_height_map: Dict mapping hex colors to heights in mm (default: None)
 
     Returns:
         tuple: (file_or_zip_path, model3d_value, preview_image, status_text).
@@ -682,10 +686,15 @@ def process_batch_generation(batch_files, is_batch, single_image, lut_path, targ
         modeling_mode = ModelingMode(modeling_mode)
     # Use default white color for backing (fixed, not user-selectable)
     backing_color_name = "White"
+    
+    # Prepare relief mode parameters
+    if color_height_map is None:
+        color_height_map = {}
+    
     args = (lut_path, target_width_mm, spacer_thick, structure_mode, auto_bg, bg_tol,
             color_mode, add_loop, loop_width, loop_length, loop_hole, loop_pos,
             modeling_mode, quantize_colors, color_replacements, backing_color_name,
-            separate_backing)
+            separate_backing, enable_relief, color_height_map)
 
     if not is_batch:
         out_path, glb_path, preview_img, status = generate_final_model(single_image, *args)
@@ -1508,6 +1517,61 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 info="勾选后，底板将作为独立对象导出到3MF文件"
             )
             
+            # ========== 2.5D Relief Mode Controls ==========
+            components['checkbox_conv_relief_mode'] = gr.Checkbox(
+                label="开启 2.5D 浮雕模式 | Enable Relief Mode",
+                value=False,
+                info="为不同颜色设置独立的Z轴高度，保留顶部5层光学叠色（强制单面，观赏面朝上）"
+            )
+            
+            # Relief height slider (only visible when relief mode is enabled and a color is selected)
+            components['slider_conv_relief_height'] = gr.Slider(
+                minimum=1.0,
+                maximum=20.0,
+                value=1.2,
+                step=0.1,
+                label="当前选中颜色的独立高度 | Selected Color Z-Height (mm)",
+                visible=False,
+                info="调整当前选中颜色的总高度（包含光学层）"
+            )
+            
+            # Auto Height Generator (only visible when relief mode is enabled)
+            with gr.Accordion(label="⚡ 自动高度生成器 | Auto Height Generator", open=False, visible=False) as conv_auto_height_accordion:
+                gr.Markdown("根据颜色明度自动生成归一化高度映射 | Automatically generate normalized heights based on color luminance")
+                
+                components['radio_conv_auto_height_mode'] = gr.Radio(
+                    choices=[
+                        ("深色凸起 | Darker Higher", "深色凸起"),
+                        ("浅色凸起 | Lighter Higher", "浅色凸起")
+                    ],
+                    value="深色凸起",
+                    label="排列规则 | Sorting Rule",
+                    info="选择哪种颜色应该更高"
+                )
+                
+                components['slider_conv_auto_height_max'] = gr.Slider(
+                    minimum=2.0,
+                    maximum=15.0,
+                    value=5.0,
+                    step=0.1,
+                    label="最大浮雕高度 | Max Relief Height (mm)",
+                    info="所有颜色的最大高度（相对于底板）"
+                )
+                
+                components['btn_conv_auto_height_apply'] = gr.Button(
+                    "✨ 一键生成高度 | Apply Auto Heights",
+                    variant="primary"
+                )
+            
+            components['accordion_conv_auto_height'] = conv_auto_height_accordion
+            
+            # State to store per-color height mapping: {hex_color: height_mm}
+            conv_color_height_map = gr.State({})
+            
+            # State to track currently selected color for height adjustment
+            conv_relief_selected_color = gr.State(None)
+            # ========== END 2.5D Relief Mode Controls ==========
+            
             conv_target_height_mm = components['slider_conv_height']
 
             with gr.Row(elem_classes=["compact-row"]):
@@ -2166,6 +2230,17 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
             return _preview_update(img), gr.update(), gr.update(), msg
         return _preview_update(img), hex_val, hex_val, msg
 
+    # Relief mode: update slider when color is selected
+    def on_color_selected_for_relief(hex_color, enable_relief, height_map, base_thickness):
+        """When user clicks a color in preview, update relief slider"""
+        if not enable_relief or not hex_color:
+            return gr.update(visible=False), hex_color
+        
+        # Get current height for this color (default to base thickness)
+        current_height = height_map.get(hex_color, base_thickness)
+        
+        return gr.update(visible=True, value=current_height), hex_color
+
     conv_preview.select(
             fn=on_preview_click_sync_ui,
             inputs=[conv_preview_cache],
@@ -2175,6 +2250,19 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 conv_selected_color,
                 components['textbox_conv_status']
             ]
+    ).then(
+        # Also update relief slider when clicking preview image
+        fn=on_color_selected_for_relief,
+        inputs=[
+            conv_selected_color,
+            components['checkbox_conv_relief_mode'],
+            conv_color_height_map,
+            components['slider_conv_thickness']
+        ],
+        outputs=[
+            components['slider_conv_relief_height'],
+            conv_relief_selected_color
+        ]
     )
     def update_preview_with_loop_with_fit(cache, loop_pos, add_loop,
                                           loop_width, loop_length, loop_hole, loop_angle):
@@ -2213,6 +2301,120 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 ],
                 outputs=[conv_preview]
             )
+    # ========== Relief Mode Event Handlers ==========
+    def on_relief_mode_toggle(enable_relief, selected_color, height_map, base_thickness):
+        """Toggle relief mode visibility and reset state"""
+        if not enable_relief:
+            # Disable relief mode - hide slider, accordion, and clear state
+            return gr.update(visible=False), gr.update(visible=False), {}, None
+        else:
+            # Enable relief mode - show accordion, show slider if color is selected
+            if selected_color:
+                current_height = height_map.get(selected_color, base_thickness)
+                return gr.update(visible=True, value=current_height), gr.update(visible=True), height_map, selected_color
+            else:
+                return gr.update(visible=False), gr.update(visible=True), height_map, selected_color
+    
+    components['checkbox_conv_relief_mode'].change(
+        on_relief_mode_toggle,
+        inputs=[
+            components['checkbox_conv_relief_mode'],
+            conv_relief_selected_color,
+            conv_color_height_map,
+            components['slider_conv_thickness']
+        ],
+        outputs=[
+            components['slider_conv_relief_height'],
+            components['accordion_conv_auto_height'],
+            conv_color_height_map,
+            conv_relief_selected_color
+        ]
+    )
+    
+    # Hook into existing color selection event (when user clicks palette swatch or uses color trigger button)
+    conv_color_trigger_btn.click(
+        on_color_selected_for_relief,
+        inputs=[
+            conv_color_selected_hidden,
+            components['checkbox_conv_relief_mode'],
+            conv_color_height_map,
+            components['slider_conv_thickness']
+        ],
+        outputs=[
+            components['slider_conv_relief_height'],
+            conv_relief_selected_color
+        ]
+    )
+    
+    def on_relief_height_change(new_height, selected_color, height_map):
+        """Update height map when slider changes"""
+        if selected_color:
+            height_map[selected_color] = new_height
+            print(f"[Relief] Updated {selected_color} -> {new_height}mm")
+        return height_map
+    
+    components['slider_conv_relief_height'].change(
+        on_relief_height_change,
+        inputs=[
+            components['slider_conv_relief_height'],
+            conv_relief_selected_color,
+            conv_color_height_map
+        ],
+        outputs=[conv_color_height_map]
+    )
+    
+    # Auto Height Generator Event Handler
+    def on_auto_height_apply(cache, mode, max_relief_height, base_thickness):
+        """Generate automatic height mapping based on color luminance using normalization"""
+        if cache is None:
+            gr.Warning("⚠️ 请先生成预览图 | Please generate preview first")
+            return {}
+        
+        # Extract unique colors from the preview cache
+        # cache structure: {'preview': img_array, 'matched_rgb': rgb_array, ...}
+        if 'matched_rgb' not in cache:
+            gr.Warning("⚠️ 预览数据不完整 | Preview data incomplete")
+            return {}
+        
+        matched_rgb = cache['matched_rgb']
+        
+        # Extract unique colors (convert to hex)
+        unique_colors = set()
+        h, w = matched_rgb.shape[:2]
+        for y in range(h):
+            for x in range(w):
+                r, g, b = matched_rgb[y, x]
+                # Skip transparent/background pixels (assuming black is background)
+                if r == 0 and g == 0 and b == 0:
+                    continue
+                hex_color = f'#{r:02x}{g:02x}{b:02x}'
+                unique_colors.add(hex_color)
+        
+        if not unique_colors:
+            gr.Warning("⚠️ 未找到有效颜色 | No valid colors found")
+            return {}
+        
+        color_list = list(unique_colors)
+        
+        # Generate height map using the normalized algorithm
+        new_height_map = generate_auto_height_map(color_list, mode, base_thickness, max_relief_height)
+        
+        gr.Info(f"✅ 已根据颜色明度自动生成 {len(new_height_map)} 个颜色的归一化高度！您可以继续点击单个颜色进行微调。")
+        
+        return new_height_map
+    
+    components['btn_conv_auto_height_apply'].click(
+        on_auto_height_apply,
+        inputs=[
+            conv_preview_cache,
+            components['radio_conv_auto_height_mode'],
+            components['slider_conv_auto_height_max'],
+            components['slider_conv_thickness']
+        ],
+        outputs=[conv_color_height_map]
+    )
+    # ========== END Relief Mode Event Handlers ==========
+    
     generate_event = components['btn_conv_generate_btn'].click(
             fn=process_batch_generation,
             inputs=[
@@ -2234,7 +2436,9 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 components['radio_conv_modeling_mode'],
                 components['slider_conv_quantize_colors'],
                 conv_replacement_map,
-                components['checkbox_conv_separate_backing']
+                components['checkbox_conv_separate_backing'],
+                components['checkbox_conv_relief_mode'],
+                conv_color_height_map
             ],
             outputs=[
                 components['file_conv_download_file'],
