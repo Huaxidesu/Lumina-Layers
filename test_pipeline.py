@@ -41,8 +41,9 @@ TEST COVERAGE MATRIX:
 │   ✓ Size variations (30mm-100mm)                                            │
 │   ✓ Image formats (PNG, JPG, SVG)                                           │
 │   ✓ LUT switching (CMYW ↔ RYBW)                                             │
+│   ✓ Isolated pixel cleanup (on/off)                                         │
 │                                                                              │
-│ Total Test Cases: 26                                                        │
+│ Total Test Cases: 30                                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 """
 
@@ -91,6 +92,7 @@ except ImportError:
 #     'bg_tol': 10,
 #     'color_replacements': None | {'#ff0000': '#00ff00'},
 #     'separate_backing': False | True,
+#     'enable_cleanup': True | False,  # Isolated pixel cleanup (default: True)
 #     'expected_materials': 4 | 6 | 8,  # Expected number of material slots
 # }
 
@@ -562,6 +564,80 @@ TEST_CASES = [
         'separate_backing': False,
         'expected_materials': 4,
     },
+    
+    # ========== Isolated Pixel Cleanup Tests ==========
+    {
+        'name': '4-Color | Isolated Pixel Cleanup ON',
+        'image': 'test_images/sample_logo.png',
+        'lut': 'lut-npy预设/bambulab/bambulab_pla_basic_rybw.npy',
+        'color_mode': '4-Color',
+        'modeling_mode': 'high-fidelity',
+        'target_width_mm': 50.0,
+        'quantize_colors': 64,
+        'blur_kernel': 0,
+        'smooth_sigma': 10,
+        'structure_mode': 'Double-sided',
+        'auto_bg': True,
+        'bg_tol': 10,
+        'color_replacements': None,
+        'separate_backing': False,
+        'expected_materials': 4,
+        'enable_cleanup': True,
+    },
+    {
+        'name': '4-Color | Isolated Pixel Cleanup OFF',
+        'image': 'test_images/sample_logo.png',
+        'lut': 'lut-npy预设/bambulab/bambulab_pla_basic_rybw.npy',
+        'color_mode': '4-Color',
+        'modeling_mode': 'high-fidelity',
+        'target_width_mm': 50.0,
+        'quantize_colors': 64,
+        'blur_kernel': 0,
+        'smooth_sigma': 10,
+        'structure_mode': 'Double-sided',
+        'auto_bg': True,
+        'bg_tol': 10,
+        'color_replacements': None,
+        'separate_backing': False,
+        'expected_materials': 4,
+        'enable_cleanup': False,
+    },
+    {
+        'name': '6-Color | Isolated Pixel Cleanup ON',
+        'image': 'test_images/photo.jpg',
+        'lut': 'lut-npy预设/Custom/Bambulab_basic_cmywgk.npy',
+        'color_mode': '6-Color',
+        'modeling_mode': 'high-fidelity',
+        'target_width_mm': 60.0,
+        'quantize_colors': 128,
+        'blur_kernel': 0,
+        'smooth_sigma': 15,
+        'structure_mode': 'Single-sided',
+        'auto_bg': True,
+        'bg_tol': 15,
+        'color_replacements': None,
+        'separate_backing': False,
+        'expected_materials': 6,
+        'enable_cleanup': True,
+    },
+    {
+        'name': 'Pixel Mode | Cleanup Should Be Disabled',
+        'image': 'test_images/pixel_art.png',
+        'lut': 'lut-npy预设/bambulab/bambulab_pla_basic_rybw.npy',
+        'color_mode': '4-Color',
+        'modeling_mode': 'pixel',
+        'target_width_mm': 40.0,
+        'quantize_colors': 32,
+        'blur_kernel': 0,
+        'smooth_sigma': 10,
+        'structure_mode': 'Double-sided',
+        'auto_bg': False,
+        'bg_tol': 10,
+        'color_replacements': None,
+        'separate_backing': False,
+        'expected_materials': 4,
+        'enable_cleanup': True,  # Should be ignored in pixel mode
+    },
 ]
 
 # Output directory for test results
@@ -767,6 +843,7 @@ def run_single_test(test_case: Dict) -> TestResult:
             color_replacements=test_case.get('color_replacements'),
             backing_color_id=0,
             separate_backing=test_case.get('separate_backing', False),
+            enable_cleanup=test_case.get('enable_cleanup', True),  # Default to True
         )
         
         # Validation 1: Check if conversion succeeded
