@@ -36,7 +36,6 @@ jobs:
           UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
           echo "Upstream default branch: ${UPSTREAM_BRANCH}"
 
-          # Keep local docker files during merge (avoid conflicts)
           if [ ! -f .gitattributes ]; then
             printf '%s\n' \
               'Dockerfile merge=ours' \
@@ -48,18 +47,24 @@ jobs:
 
           before="$(git rev-parse HEAD)"
 
-          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || {
+          git merge --no-commit --no-ff "upstream/${UPSTREAM_BRANCH}" || {
             echo "Merge failed. Conflicts:"
             git status --porcelain
             exit 1
           }
 
-          after="$(git rev-parse HEAD)"
+          git rm -r --cached --ignore-unmatch .github || true
+          rm -rf .github || true
+
+          git add -A
 
           has_updated="false"
-          if [ "$before" != "$after" ]; then
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: sync upstream without .github"
             has_updated="true"
             git push origin "HEAD:${BRANCH}"
+          else
+            git merge --abort || true
           fi
 
           should_build="false"
@@ -69,6 +74,7 @@ jobs:
 
           echo "has_updated=${has_updated}" >> "$GITHUB_OUTPUT"
           echo "should_build=${should_build}" >> "$GITHUB_OUTPUT"
+          echo "image_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         if: steps.sync.outputs.should_build == 'true'
@@ -92,7 +98,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/huaxidesu/lumina-layers:latest
-            ghcr.io/huaxidesu/lumina-layers:sha-${{ github.sha }}
+            ghcr.io/huaxidesu/lumina-layers:sha-${{ steps.sync.outputs.image_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -107,6 +113,6 @@ jobs:
             同步源: https://github.com/MOVIBALE/Lumina-Layers
             镜像地址:
             - `docker pull ghcr.io/huaxidesu/lumina-layers:latest`
-            - `docker pull ghcr.io/huaxidesu/lumina-layers:sha-${{ github.sha }}`
+            - `docker pull ghcr.io/huaxidesu/lumina-layers:sha-${{ steps.sync.outputs.image_sha }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
