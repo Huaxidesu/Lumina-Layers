@@ -2,6 +2,7 @@
 
 import os
 import sys
+import platform
 from enum import Enum
 
 # Handle PyInstaller bundled resources
@@ -100,7 +101,7 @@ class ColorSystem:
             2: [236, 0, 140, 255],    # Magenta
             3: [0, 174, 66, 255],     # Green
             4: [244, 238, 42, 255],   # Yellow
-            5: [20, 20, 20, 255]      # Black
+            5: [0, 0, 0, 255]         # Black (纯黑 #000000)
         },
         'map': {"White": 0, "Cyan": 1, "Magenta": 2, "Green": 3, "Yellow": 4, "Black": 5},
         'corner_labels': ["白色 (左上)", "青色 (右上)", "品红 (右下)", "黄色 (左下)"],
@@ -112,7 +113,7 @@ class ColorSystem:
         'slots': ['Slot 1 (White)', 'Slot 2 (Cyan)', 'Slot 3 (Magenta)', 'Slot 4 (Yellow)', 'Slot 5 (Black)', 'Slot 6 (Red)', 'Slot 7 (Deep Blue)', 'Slot 8 (Green)'],
         'preview': {
             0: [255, 255, 255, 255], 1: [0, 134, 214, 255], 2: [236, 0, 140, 255], 3: [244, 238, 42, 255],
-            4: [20, 20, 20, 255], 5: [193, 46, 31, 255], 6: [10, 41, 137, 255], 7: [0, 174, 66, 255]
+            4: [0, 0, 0, 255], 5: [193, 46, 31, 255], 6: [10, 41, 137, 255], 7: [0, 174, 66, 255]
         },
         'map': {'White': 0, 'Cyan': 1, 'Magenta': 2, 'Yellow': 3, 'Black': 4, 'Red': 5, 'Deep Blue': 6, 'Green': 7},
         'corner_labels': ['TL', 'TR', 'BR', 'BL']
@@ -125,7 +126,7 @@ class ColorSystem:
         'slots': ["White", "Black"],
         'preview': {
             0: [255, 255, 255, 255],  # White
-            1: [20, 20, 20, 255]      # Black
+            1: [0, 0, 0, 255]         # Black (纯黑 #000000)
         },
         'map': {"White": 0, "Black": 1},
         'corner_labels': ["白色 (左上)", "黑色 (右上)", "黑色 (右下)", "黑色 (左下)"],
@@ -255,3 +256,41 @@ class VectorConfig:
     # Parallel processing
     ENABLE_PARALLEL: bool = False      # Parallel layer processing (experimental)
     MAX_WORKERS: int = 5               # Thread pool size
+
+
+# ========== Runtime Platform Policy ==========
+
+def _env_flag(name: str) -> bool:
+    """Return True for common truthy env var values."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_wsl_runtime() -> bool:
+    """Detect whether current runtime is WSL."""
+    if "WSL_DISTRO_NAME" in os.environ or "WSL_INTEROP" in os.environ:
+        return True
+    try:
+        return "microsoft" in platform.release().lower()
+    except Exception:
+        return False
+
+
+def get_tray_runtime_policy():
+    """Return (enabled, reason) for system tray initialization."""
+    if _env_flag("DISABLE_TRAY"):
+        return False, "Disabled by DISABLE_TRAY environment variable"
+
+    if is_wsl_runtime():
+        return False, "Disabled on WSL environment"
+
+    # Linux desktop tray support is inconsistent across distros/DEs.
+    # Keep it opt-in to avoid startup noise.
+    if sys.platform.startswith("linux"):
+        if _env_flag("ENABLE_TRAY"):
+            return True, "Enabled on Linux via ENABLE_TRAY=1"
+        return False, "Disabled on Linux by default (set ENABLE_TRAY=1 to force)"
+
+    if os.name == "nt" or sys.platform == "darwin":
+        return True, "Enabled on desktop platform"
+
+    return False, f"Disabled on unsupported platform: {sys.platform}"
