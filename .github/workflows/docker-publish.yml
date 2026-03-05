@@ -11,6 +11,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: write
 
     steps:
       - name: Checkout Repository
@@ -28,36 +29,35 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
-
           git remote add upstream https://github.com/MOVIBALE/Lumina-Layers.git 2>/dev/null || true
           git fetch --prune upstream
 
           UPSTREAM_BRANCH="$(git remote show upstream | sed -n 's/.*HEAD branch: //p' | head -n 1)"
           UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
-          echo "Upstream default branch: ${UPSTREAM_BRANCH}"
 
-          # Keep local docker files during merge (avoid conflicts)
+          BEFORE_SHA="$(git rev-parse HEAD)"
+
           if [ ! -f .gitattributes ]; then
             printf '%s\n' \
               'Dockerfile merge=ours' \
               'docker-compose.yml merge=ours' > .gitattributes
             git add .gitattributes
-            git commit -m "chore: keep local docker files on upstream sync" || true
+            git commit -m "chore: preserve local config" || true
           fi
           git config merge.ours.driver true
 
-          before="$(git rev-parse HEAD)"
-
           git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || {
-            echo "Merge failed. Conflicts:"
-            git status --porcelain
-            exit 1
+            echo "Merge encountered conflicts, forcing .github restoration..."
           }
 
-          after="$(git rev-parse HEAD)"
+          git checkout "$BEFORE_SHA" -- .github
+          git add .github
+          git commit --amend --no-edit || git commit -m "chore: sync and protect workflows"
+
+          AFTER_SHA="$(git rev-parse HEAD)"
 
           has_updated="false"
-          if [ "$before" != "$after" ]; then
+          if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
             has_updated="true"
             git push origin "HEAD:${BRANCH}"
           fi
