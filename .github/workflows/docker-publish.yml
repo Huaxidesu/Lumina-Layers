@@ -42,24 +42,22 @@ jobs:
               'Dockerfile merge=ours' \
               'docker-compose.yml merge=ours' > .gitattributes
             git add .gitattributes
-            git commit -m "chore: protect local config" || true
+            git commit -m "chore: protect config" || true
           fi
           git config merge.ours.driver true
 
-          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || {
-            echo "Merge encountered conflicts, forcing restoration..."
-          }
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || echo "Merged with logic"
 
           git checkout "$BEFORE_SHA" -- .github
           git add .github
-          git commit --amend --no-edit || git commit -m "chore: restore local workflows"
+          git commit --amend --no-edit || git commit -m "chore: sync and restore workflows"
 
           AFTER_SHA="$(git rev-parse HEAD)"
 
           has_updated="false"
           if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
             has_updated="true"
-            git push origin "HEAD:${BRANCH}"
+            git push origin "HEAD:${BRANCH}" --force
           fi
 
           should_build="false"
