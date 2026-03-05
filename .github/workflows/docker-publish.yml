@@ -11,7 +11,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      actions: write
 
     steps:
       - name: Checkout Repository
@@ -29,35 +28,38 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+
           git remote add upstream https://github.com/MOVIBALE/Lumina-Layers.git 2>/dev/null || true
           git fetch --prune upstream
 
           UPSTREAM_BRANCH="$(git remote show upstream | sed -n 's/.*HEAD branch: //p' | head -n 1)"
           UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
+          echo "Upstream default branch: ${UPSTREAM_BRANCH}"
 
-          BEFORE_SHA="$(git rev-parse HEAD)"
-
+          # Keep local docker files during merge (avoid conflicts)
           if [ ! -f .gitattributes ]; then
             printf '%s\n' \
               'Dockerfile merge=ours' \
               'docker-compose.yml merge=ours' > .gitattributes
             git add .gitattributes
-            git commit -m "chore: protect config" || true
+            git commit -m "chore: keep local docker files on upstream sync" || true
           fi
           git config merge.ours.driver true
 
-          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || echo "Merged with logic"
+          before="$(git rev-parse HEAD)"
 
-          git checkout "$BEFORE_SHA" -- .github
-          git add .github
-          git commit --amend --no-edit || git commit -m "chore: sync and restore workflows"
+          git merge --no-edit "upstream/${UPSTREAM_BRANCH}" || {
+            echo "Merge failed. Conflicts:"
+            git status --porcelain
+            exit 1
+          }
 
-          AFTER_SHA="$(git rev-parse HEAD)"
+          after="$(git rev-parse HEAD)"
 
           has_updated="false"
-          if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
+          if [ "$before" != "$after" ]; then
             has_updated="true"
-            git push origin "HEAD:${BRANCH}" --force
+            git push origin "HEAD:${BRANCH}"
           fi
 
           should_build="false"
