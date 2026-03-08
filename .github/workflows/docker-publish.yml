@@ -29,6 +29,11 @@ jobs:
 
           BRANCH="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
 
+          keep_dir="$(mktemp -d)"
+          if [ -d .github ]; then
+            tar -czf "${keep_dir}/github.tgz" .github
+          fi
+
           git remote add upstream https://github.com/MOVIBALE/Lumina-Layers.git 2>/dev/null || true
           git fetch --prune upstream
 
@@ -55,6 +60,10 @@ jobs:
 
           git rm -r --cached --ignore-unmatch .github || true
           rm -rf .github || true
+
+          if [ -f "${keep_dir}/github.tgz" ]; then
+            tar -xzf "${keep_dir}/github.tgz"
+          fi
 
           git add -A
 
