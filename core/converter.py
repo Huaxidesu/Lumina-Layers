@@ -5,6 +5,9 @@ Coordinates modules to complete image-to-3D model conversion.
 """
 
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
 import numpy as np
 import cv2
 import trimesh
@@ -13,11 +16,13 @@ import gradio as gr
 from typing import List, Dict, Tuple, Optional
 
 from config import PrinterConfig, ColorSystem, ModelingMode, PREVIEW_SCALE, PREVIEW_MARGIN, OUTPUT_DIR, BedManager
-from utils import Stats, safe_fix_3mf_names
+from utils import Stats
+from utils.bambu_3mf_writer import export_scene_with_bambu_metadata
 
 from core.image_processing import LuminaImageProcessor
 from core.mesh_generators import get_mesher
 from core.geometry_utils import create_keychain_loop
+from core.heightmap_loader import HeightmapLoader
 from core.naming import generate_model_filename, generate_preview_filename
 
 # Try to import SVG rendering libraries
@@ -121,19 +126,19 @@ def get_lut_color_choices(lut_path: str) -> List[tuple]:
 def generate_lut_color_dropdown_html(lut_path: str, selected_color: str = None, used_colors: set = None) -> str:
     """
     Generate HTML for displaying LUT available colors as a clickable visual grid.
-    
+
     Colors are grouped into two sections:
     1. Colors used in current image (if any)
     2. Other available colors
-    
+
     This provides a visual preview of all available colors from the LUT,
     allowing users to click directly to select a replacement color.
-    
+
     Args:
         lut_path: Path to the LUT .npy file
         selected_color: Currently selected replacement color hex
         used_colors: Set of hex colors currently used in the image (for grouping)
-    
+
     Returns:
         HTML string showing available colors as a clickable grid
     """
@@ -141,6 +146,200 @@ def generate_lut_color_dropdown_html(lut_path: str, selected_color: str = None, 
     colors = extract_lut_available_colors(lut_path)
     # Delegate HTML generation to palette_extension (non-invasive)
     return generate_lut_color_grid_html(colors, selected_color, used_colors)
+
+
+def _compute_connected_region_mask_4n(quantized_image, mask_solid, x, y):
+    """基于 4 邻接计算点击像素所属连通域掩码。"""
+    h, w = quantized_image.shape[:2]
+    if not (0 <= x < w and 0 <= y < h) or not mask_solid[y, x]:
+        return np.zeros((h, w), dtype=bool)
+
+    target = quantized_image[y, x]
+    out = np.zeros((h, w), dtype=bool)
+    q = deque([(x, y)])
+    out[y, x] = True
+
+    while q:
+        cx, cy = q.popleft()
+        for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
+            if 0 <= nx < w and 0 <= ny < h and not out[ny, nx]:
+                if mask_solid[ny, nx] and np.array_equal(quantized_image[ny, nx], target):
+                    out[ny, nx] = True
+                    q.append((nx, ny))
+
+    return out
+
+
+def _recommend_lut_colors_by_rgb(base_rgb, lut_colors, top_k=10):
+    """按 RGB 欧氏距离推荐 LUT 颜色，返回前 top_k 项。"""
+    if not lut_colors:
+        return []
+
+    normalized = []
+    for c in lut_colors:
+        if isinstance(c, dict):
+            color = c.get("color")
+            hex_color = c.get("hex")
+            if color is None and isinstance(hex_color, str) and len(hex_color.strip().lstrip('#')) == 6:
+                h = hex_color.strip().lstrip('#')
+                color = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+            if color is not None and isinstance(hex_color, str):
+                normalized.append({"color": tuple(int(v) for v in color), "hex": hex_color.lower()})
+            continue
+
+        if isinstance(c, (tuple, list)) and len(c) >= 2 and isinstance(c[1], str):
+            h = c[1].strip().lstrip('#')
+            if len(h) != 6:
+                continue
+            normalized.append({
+                "color": (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)),
+                "hex": f"#{h.lower()}"
+            })
+
+    if not normalized:
+        return []
+
+    arr = np.array([c["color"] for c in normalized], dtype=np.float64)
+    b = np.array(base_rgb, dtype=np.float64)
+    dist = np.sqrt(np.sum((arr - b) ** 2, axis=1))
+    idx = np.argsort(dist)[:top_k]
+    return [normalized[i] for i in idx]
+
+
+def _ensure_quantized_image_in_cache(cache):
+    """保证预览缓存中存在 quantized_image，缺失时自动回填。"""
+    if cache.get("quantized_image") is not None:
+        return cache
+
+    dbg = cache.get("debug_data") or {}
+    q = dbg.get("quantized_image")
+    if q is None:
+        q = cache["matched_rgb"].copy()
+
+    cache["quantized_image"] = q
+    return cache
+
+
+def _rgb_to_hex(rgb):
+    """将 RGB 三元组转换为 #RRGGBB。"""
+    r, g, b = [int(x) for x in rgb]
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _hex_to_rgb_tuple(hex_color):
+    """将 #RRGGBB 转换为 (R, G, B)。"""
+    if not isinstance(hex_color, str):
+        raise ValueError("hex_color must be a string")
+
+    h = hex_color.strip().lower()
+    if h.startswith('#'):
+        h = h[1:]
+    if len(h) != 6:
+        raise ValueError(f"invalid hex color: {hex_color}")
+
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _build_selection_meta(q_rgb, m_rgb, scope="region"):
+    """构建点击选区元数据（量化色 + 原配准色）。"""
+    return {
+        "selected_quantized_hex": _rgb_to_hex(q_rgb),
+        "selected_matched_hex": _rgb_to_hex(m_rgb),
+        "selection_scope": scope,
+    }
+
+
+def _resolve_highlight_mask(color_match, mask_solid, region_mask=None, scope="global"):
+    """根据选择范围决定高亮掩码：区域优先，否则全图同色。"""
+    if scope == "region" and region_mask is not None:
+        return region_mask & mask_solid
+    return color_match & mask_solid
+
+
+def _normalize_color_replacements_input(color_replacements):
+    """兼容 dict / replacement_regions(list) 两种替换输入，统一为 {hex: hex}。"""
+    if not color_replacements:
+        return {}
+
+    if isinstance(color_replacements, dict):
+        out = {}
+        for src, dst in color_replacements.items():
+            if not isinstance(src, str) or not isinstance(dst, str):
+                continue
+            s = src.strip().lower()
+            d = dst.strip().lower()
+            if s and d:
+                out[s] = d
+        return out
+
+    if isinstance(color_replacements, list):
+        out = {}
+        for item in color_replacements:
+            if not isinstance(item, dict):
+                continue
+            src = (item.get('matched') or item.get('source') or item.get('quantized') or '').strip().lower()
+            dst = (item.get('replacement') or '').strip().lower()
+            if src and dst:
+                out[src] = dst
+        return out
+
+    return {}
+
+
+def _apply_region_replacement(image_rgb, region_mask, replacement_rgb):
+    """仅在 region_mask 覆盖区域应用替换色。"""
+    out = image_rgb.copy()
+    out[region_mask] = np.array(replacement_rgb, dtype=np.uint8)
+    return out
+
+
+def _apply_regions_to_raster_outputs(matched_rgb, material_matrix, mask_solid,
+                                     replacement_regions, lut_index_resolver, ref_stacks):
+    """按 regions 顺序覆盖 raster 输出（matched_rgb + material_matrix）。"""
+    out_rgb = matched_rgb.copy()
+    out_mat = material_matrix.copy()
+
+    for item in (replacement_regions or []):
+        region_mask = item.get('mask')
+        replacement_hex = item.get('replacement')
+        if region_mask is None or not replacement_hex:
+            continue
+
+        effective_mask = region_mask & mask_solid
+        if not np.any(effective_mask):
+            continue
+
+        replacement_rgb = _hex_to_rgb_tuple(replacement_hex)
+        out_rgb[effective_mask] = np.array(replacement_rgb, dtype=np.uint8)
+
+        lut_idx = int(lut_index_resolver(replacement_rgb))
+        out_mat[effective_mask] = ref_stacks[lut_idx]
+
+    return out_rgb, out_mat
+
+
+def _build_dual_recommendations(q_rgb, m_rgb, lut_colors, top_k=10):
+    """构建双基准推荐：按量化色与按原配准色。"""
+    return {
+        "by_quantized": _recommend_lut_colors_by_rgb(q_rgb, lut_colors, top_k=top_k),
+        "by_matched": _recommend_lut_colors_by_rgb(m_rgb, lut_colors, top_k=top_k),
+    }
+
+
+def _resolve_click_selection_hexes(cache, default_hex):
+    """解析点击后的显示色与内部状态色。
+
+    显示色优先使用原配准色，内部状态色保持量化色，
+    以兼容“显示原图色、替换按量化色作用连通域”的设计。
+    """
+    cached_q_hex = (cache or {}).get('selected_quantized_hex')
+    cached_m_hex = (cache or {}).get('selected_matched_hex')
+
+    # Gradio update objects are dict-like; they must not propagate into hex state.
+    fallback_hex = default_hex if isinstance(default_hex, str) else None
+    q_hex = cached_q_hex if isinstance(cached_q_hex, str) else fallback_hex
+    m_hex = cached_m_hex if isinstance(cached_m_hex, str) else q_hex
+    return m_hex, q_hex
 
 
 # ========== Color Palette Functions ==========
@@ -267,14 +466,17 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                          add_loop, loop_width, loop_length, loop_hole, loop_pos,
                          modeling_mode=ModelingMode.VECTOR, quantize_colors=32,
                          blur_kernel=0, smooth_sigma=10,
-                         color_replacements=None, backing_color_id=0, separate_backing=False,
+                         color_replacements=None, replacement_regions=None, backing_color_id=0, separate_backing=False,
                          enable_relief=False, color_height_map=None,
+                         height_mode: str = "color",
+                         heightmap_path=None, heightmap_max_height=None,
                          enable_cleanup=True,
                          enable_outline=False, outline_width=2.0,
                          enable_cloisonne=False, wire_width_mm=0.4,
                          wire_height_mm=0.4,
                          free_color_set=None,
-                         enable_coating=False, coating_height_mm=0.08):
+                         enable_coating=False, coating_height_mm=0.08,
+                         progress=None):
     """
     Main conversion function: Convert image to 3D model.
     
@@ -312,11 +514,15 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     Returns:
         Tuple of (3mf_path, glb_path, preview_image, status_message)
     """
+    def _prog(val: float, desc: str = ""):
+        if progress is not None:
+            progress(val, desc=desc)
+
     # Input validation
     if image_path is None:
-        return None, None, None, "❌ Please upload an image"
+        return None, None, None, "[ERROR] Please upload an image", None
     if lut_path is None:
-        return None, None, None, "⚠️ Please select or upload a .npy calibration file!"
+        return None, None, None, "[WARNING] Please select or upload a .npy calibration file!", None
     
     # Handle LUT path (supports string path or Gradio File object)
     if isinstance(lut_path, str):
@@ -324,7 +530,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     elif hasattr(lut_path, 'name'):
         actual_lut_path = lut_path.name
     else:
-        return None, None, None, "❌ Invalid LUT file format"
+        return None, None, None, "[ERROR] Invalid LUT file format", None
     
     # Handle backing separation: override backing_color_id if separate_backing is True
     # Error handling for checkbox state (Requirement 8.4)
@@ -349,55 +555,125 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Check if user selected vector mode AND file is SVG
     if modeling_mode == ModelingMode.VECTOR and image_path.lower().endswith('.svg'):
         print("[CONVERTER] 🎨 Using Native Vector Engine (Shapely/Clipper)...")
-        
+        vector_timing = {}
+        vector_total_t0 = time.perf_counter()
+
+        vector_replacements = _normalize_color_replacements_input(replacement_regions)
+        if not vector_replacements:
+            vector_replacements = _normalize_color_replacements_input(color_replacements)
+
         try:
             from core.vector_engine import VectorProcessor
-            
+
             # 1. Execute Conversion
             vec_processor = VectorProcessor(actual_lut_path, color_mode)
-            
+
             # Convert SVG to 3D scene
+            _prog(0.05, "SVG 解析与几何处理中... | Parsing & extruding SVG...")
+            mesh_t0 = time.perf_counter()
             scene = vec_processor.svg_to_mesh(
                 svg_path=image_path,
                 target_width_mm=target_width_mm,
                 thickness_mm=spacer_thick,
                 structure_mode=structure_mode,
-                color_replacements=color_replacements
+                color_replacements=vector_replacements,
             )
+            vector_timing["mesh_total_s"] = time.perf_counter() - mesh_t0
+            if isinstance(getattr(vec_processor, "last_stage_timings", None), dict):
+                vector_timing.update(vec_processor.last_stage_timings)
+
+            # Keep vector export behavior consistent with raster path:
+            # never export an empty scene.
+            if len(scene.geometry) == 0:
+                return None, None, None, "[ERROR] Vector mesh generation failed: no valid geometry generated", None
             
-            # 2. Export 3MF
+            # 2. Export 3MF (unified Bambu metadata path)
+            _prog(0.72, "导出 3MF 中... | Exporting 3MF...")
             base_name = os.path.splitext(os.path.basename(image_path))[0]
             out_path = os.path.join(OUTPUT_DIR, generate_model_filename(base_name, modeling_mode, color_mode))
-            scene.export(out_path)
-            
-            # [CRITICAL FIX] Disable safe_fix_3mf_names for Vector Mode
-            # Vector engine assigns names internally. External fixing causes index shifts
-            # if layers are missing (e.g., skipping Green causes Yellow to be named Green).
-            # safe_fix_3mf_names(out_path, color_conf['slots'])  # <-- DISABLED
-            
-            print(f"[CONVERTER] ✅ Vector 3MF exported: {out_path}")
+
+            is_six_color = len(vec_processor.img_processor.lut_rgb) == 1296
+            if is_six_color:
+                vec_color_conf = ColorSystem.SIX_COLOR
+                vec_color_mode = "6-Color"
+            else:
+                vec_color_conf = ColorSystem.get(color_mode)
+                vec_color_mode = color_mode
+
+            vec_slot_names = []
+            for geom_name, geom in scene.geometry.items():
+                vertices = getattr(geom, "vertices", None)
+                faces = getattr(geom, "faces", None)
+                v_count = len(vertices) if vertices is not None else 0
+                f_count = len(faces) if faces is not None else 0
+                if v_count == 0 or f_count == 0:
+                    print(f"[CONVERTER] Skipping empty vector geometry '{geom_name}' (v={v_count}, f={f_count})")
+                    continue
+                vec_slot_names.append(geom_name)
+
+            if not vec_slot_names:
+                return None, None, None, "[ERROR] Vector export aborted: all generated geometries are empty", None
+            vec_preview_colors = vec_color_conf['preview']
+
+            vec_print_settings = {
+                'layer_height': '0.08',
+                'initial_layer_height': '0.08',
+                'wall_loops': '1',
+                'top_shell_layers': '0',
+                'bottom_shell_layers': '0',
+                'sparse_infill_density': '100%',
+                'sparse_infill_pattern': 'zig-zag',
+                'nozzle_temperature': ['220'] * 8,
+                'bed_temperature': ['60'] * 8,
+                'filament_type': ['PLA'] * 8,
+                'print_speed': '100',
+                'travel_speed': '150',
+                'enable_support': '0',
+                'brim_width': '5',
+                'brim_type': 'auto_brim',
+            }
+
+            export_t0 = time.perf_counter()
+            export_scene_with_bambu_metadata(
+                scene=scene,
+                output_path=out_path,
+                slot_names=vec_slot_names,
+                preview_colors=vec_preview_colors,
+                settings=vec_print_settings,
+                color_mode=vec_color_mode,
+            )
+            print(f"[CONVERTER] Vector 3MF exported with Bambu metadata: {out_path}")
+            vector_timing["export_3mf_s"] = time.perf_counter() - export_t0
             
             # 4. Generate GLB Preview
+            _prog(0.82, "生成 3D 预览中... | Generating 3D preview...")
             glb_path = None
+            glb_t0 = time.perf_counter()
             try:
                 glb_path = os.path.join(OUTPUT_DIR, generate_preview_filename(base_name))
                 scene.export(glb_path)
                 print(f"[CONVERTER] ✅ Preview GLB exported: {glb_path}")
             except Exception as e:
                 print(f"[CONVERTER] Warning: Preview generation skipped: {e}")
+            vector_timing["export_glb_s"] = time.perf_counter() - glb_t0
             
             # 5. [FIX] Generate 2D Preview Image from SVG
+            _prog(0.90, "生成 2D 预览中... | Generating 2D preview...")
             preview_img = None
-            if HAS_SVG_LIB:
+            preview_t0 = time.perf_counter()
+            skip_heavy_preview = os.getenv("LUMINA_VECTOR_SKIP_2D_PREVIEW", "0") == "1"
+            if skip_heavy_preview:
+                print("[CONVERTER] Skipping SVG 2D preview due to LUMINA_VECTOR_SKIP_2D_PREVIEW=1")
+            elif HAS_SVG_LIB:
                 try:
                     # Use SVG-safe rasterization with bounds normalization
-                    preview_rgba = vec_processor.img_processor._load_svg(image_path, target_width_mm)
+                    preview_rgba = vec_processor.img_processor._load_svg(image_path, target_width_mm, pixels_per_mm=10.0)
 
                     # Apply color replacements to preview if provided
-                    if color_replacements:
+                    if vector_replacements:
                         from core.color_replacement import ColorReplacementManager
-                        
-                        manager = ColorReplacementManager.from_dict(color_replacements)
+
+                        manager = ColorReplacementManager.from_dict(vector_replacements)
                         replacements = manager.get_all_replacements()
                         
                         if replacements:
@@ -457,13 +733,32 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                     print(f"[CONVERTER] Failed to render SVG preview: {e}")
             else:
                 print("[CONVERTER] svglib not installed, skipping 2D preview")
+            vector_timing["preview_2d_s"] = time.perf_counter() - preview_t0
             
             # Update stats
             Stats.increment("conversions")
+
+            vector_timing["vector_branch_total_s"] = time.perf_counter() - vector_total_t0
+            if vector_timing:
+                print(
+                    "[CONVERTER] Vector timings (s): "
+                    f"parse={vector_timing.get('parse_s', 0.0):.3f}, "
+                    f"clip={vector_timing.get('occlusion_s', 0.0):.3f}, "
+                    f"match={vector_timing.get('color_match_s', 0.0):.3f}, "
+                    f"extrude_bottom={vector_timing.get('extrude_bottom_s', 0.0):.3f}, "
+                    f"backing={vector_timing.get('backing_s', 0.0):.3f}, "
+                    f"extrude_top={vector_timing.get('extrude_top_s', 0.0):.3f}, "
+                    f"assemble={vector_timing.get('assemble_s', 0.0):.3f}, "
+                    f"mesh_total={vector_timing.get('mesh_total_s', 0.0):.3f}, "
+                    f"export_3mf={vector_timing.get('export_3mf_s', 0.0):.3f}, "
+                    f"export_glb={vector_timing.get('export_glb_s', 0.0):.3f}, "
+                    f"preview_2d={vector_timing.get('preview_2d_s', 0.0):.3f}, "
+                    f"total={vector_timing.get('vector_branch_total_s', 0.0):.3f}"
+                )
             
-            # Return results
+            # Return results (Vector mode doesn't generate color recipe)
             msg = f"✅ Vector conversion complete! Objects merged by material."
-            return out_path, glb_path, preview_img, msg
+            return out_path, glb_path, preview_img, msg, None
             
         except Exception as e:
             error_msg = f"❌ Vector processing failed: {e}\n\n"
@@ -474,7 +769,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             error_msg += "• Or switch to 'High-Fidelity' mode for rasterization"
             
             print(f"[CONVERTER] {error_msg}")
-            return None, None, None, error_msg
+            return None, None, None, error_msg, None
     
     # If vector mode selected but file is not SVG, show warning
     if modeling_mode == ModelingMode.VECTOR and not image_path.lower().endswith('.svg'):
@@ -483,7 +778,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             "Your file is not an SVG. Please either:\n"
             "• Upload an SVG file, or\n"
             "• Switch to 'High-Fidelity' or 'Pixel Art' mode"
-        )
+        ), None
     
     # ========== [EXISTING] Raster-based Processing ==========
     # NOTE: CMYW and RYBW share 100% of the processing pipeline.
@@ -501,6 +796,12 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         backing_color_id = 0
     
     # Step 1: Image Processing
+    _prog(0.05, "图像处理与 LUT 匹配中... | Processing image...")
+    # Always enable HiFi timing for better observability (zero-overhead when not printing)
+    _bench_enabled = True
+    _hifi_timings = {}
+    _hifi_t0 = time.perf_counter()
+    
     try:
         processor = LuminaImageProcessor(actual_lut_path, color_mode)
         processor.enable_cleanup = enable_cleanup
@@ -514,8 +815,9 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             blur_kernel=blur_kernel,
             smooth_sigma=smooth_sigma
         )
+        _hifi_timings['image_proc_s'] = time.perf_counter() - _hifi_t0
     except Exception as e:
-        return None, None, None, f"❌ Image processing failed: {e}"
+        return None, None, None, f"[ERROR] Image processing failed: {e}", None
     
     matched_rgb = result['matched_rgb']
     material_matrix = result['material_matrix']
@@ -528,27 +830,45 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Apply color replacements if provided
     if color_replacements:
         from core.color_replacement import ColorReplacementManager
-        manager = ColorReplacementManager.from_dict(color_replacements)
+        normalized_replacements = _normalize_color_replacements_input(color_replacements)
+        manager = ColorReplacementManager.from_dict(normalized_replacements)
         old_rgb = matched_rgb.copy()
         matched_rgb = manager.apply_to_image(matched_rgb)
         print(f"[CONVERTER] Applied {len(manager)} color replacements")
-        
+
         # Update material_matrix: find the replacement color's LUT entry
         # and use its stacking layers (ref_stacks) for correct multi-layer output
-        for orig_hex, repl_hex in color_replacements.items():
+        for orig_hex, repl_hex in normalized_replacements.items():
             orig_rgb_tuple = ColorReplacementManager._hex_to_color(orig_hex)
             repl_rgb_tuple = ColorReplacementManager._hex_to_color(repl_hex)
             # Find pixels that were originally this color
             orig_mask = np.all(old_rgb == orig_rgb_tuple, axis=-1)
             if not np.any(orig_mask):
                 continue
-            # Query KDTree to find the closest LUT entry for the replacement color
-            _, lut_idx = processor.kdtree.query([repl_rgb_tuple])
+            # Query KDTree to find the closest LUT entry for the replacement color (in CIELAB space)
+            repl_lab = processor._rgb_to_lab(np.array([repl_rgb_tuple], dtype=np.uint8))
+            _, lut_idx = processor.kdtree.query(repl_lab)
             lut_idx = lut_idx[0]
             new_stacks = processor.ref_stacks[lut_idx]  # (COLOR_LAYERS,)
             material_matrix[orig_mask] = new_stacks
             lut_color = processor.lut_rgb[lut_idx]
             print(f"[CONVERTER] material_matrix: {orig_hex} → LUT#{lut_idx} rgb({lut_color[0]},{lut_color[1]},{lut_color[2]}) stacks={new_stacks}")
+
+    # Apply region replacements in-order (later items override earlier items)
+    if replacement_regions:
+        def _resolve_lut_index_for_rgb(replacement_rgb):
+            repl_lab = processor._rgb_to_lab(np.array([replacement_rgb], dtype=np.uint8))
+            _, lut_idx = processor.kdtree.query(repl_lab)
+            return lut_idx[0]
+
+        matched_rgb, material_matrix = _apply_regions_to_raster_outputs(
+            matched_rgb,
+            material_matrix,
+            mask_solid,
+            replacement_regions,
+            _resolve_lut_index_for_rgb,
+            processor.ref_stacks,
+        )
     
     print(f"[CONVERTER] Image processed: {target_w}×{target_h}px, scale={pixel_scale}mm/px")
     
@@ -590,8 +910,21 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Step 5: Build Voxel Matrix
     # Error handling for backing layer marking (Requirement 8.2)
     try:
+        # ========== 5-Color Extended: force single-sided face-up ==========
+        # Face-up: backing on print bed, viewing surface on top.
+        # Base stacks have air at index 0 so their viewing surface sits 1 Z
+        # below extended stacks, keeping ≤4 materials per Z layer.
+        if "5-Color Extended" in color_mode:
+            print(f"[CONVERTER] 5-Color Extended: forcing single-sided face-up")
+            structure_mode = "单面"
+            if enable_relief:
+                print(f"[CONVERTER] 5-Color Extended: 2.5D relief mode disabled (incompatible)")
+                enable_relief = False
+            full_matrix, backing_metadata = _build_voxel_matrix_faceup(
+                material_matrix, mask_solid, spacer_thick, backing_color_id
+            )
         # ========== Cloisonné (掐丝珐琅) Mode ==========
-        if enable_cloisonne:
+        elif enable_cloisonne:
             print(f"[CONVERTER] 🎨 Cloisonné Mode ENABLED")
             print(f"[CONVERTER] Wire: width={wire_width_mm}mm, height={wire_height_mm}mm")
             
@@ -608,8 +941,50 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 spacer_thick, wire_height_mm, backing_color_id
             )
         # ========== 2.5D Relief Mode Support ==========
-        elif enable_relief and color_height_map:
-            print(f"[CONVERTER] 🎨 2.5D Relief Mode ENABLED")
+        # 显式模式判断：height_mode 参数决定分支
+        heightmap_height_matrix = None
+        heightmap_stats = None
+        if enable_relief and height_mode == "heightmap" and heightmap_path is not None:
+            print(f"[CONVERTER] Heightmap Relief Mode: 尝试加载高度图...")
+            print(f"[CONVERTER] 高度图路径: {heightmap_path}")
+            try:
+                hm_max = heightmap_max_height if heightmap_max_height is not None else 5.0
+                hm_result = HeightmapLoader.load_and_process(
+                    heightmap_path=heightmap_path,
+                    target_w=target_w,
+                    target_h=target_h,
+                    max_relief_height=hm_max,
+                    base_thickness=spacer_thick
+                )
+                if hm_result['success']:
+                    heightmap_height_matrix = hm_result['height_matrix']
+                    heightmap_stats = hm_result['stats']
+                    for w in hm_result.get('warnings', []):
+                        print(f"[CONVERTER] {w}")
+                    print(f"[CONVERTER] 高度图加载成功: {heightmap_height_matrix.shape}")
+                else:
+                    print(f"[CONVERTER] WARNING: 高度图处理失败: {hm_result['error']}，回退到 flat 模式")
+            except Exception as e:
+                print(f"[CONVERTER] WARNING: 高度图处理异常: {e}，回退到 flat 模式")
+        elif enable_relief and height_mode == "heightmap" and heightmap_path is None:
+            print("[CONVERTER] WARNING: heightmap mode selected but no heightmap provided, falling back to flat")
+
+        if heightmap_height_matrix is not None:
+            # 高度图模式：使用逐像素高度矩阵
+            print(f"[CONVERTER] 2.5D Heightmap Relief Mode ENABLED")
+            full_matrix, backing_metadata = _build_relief_voxel_matrix(
+                matched_rgb=matched_rgb,
+                material_matrix=material_matrix,
+                mask_solid=mask_solid,
+                color_height_map=color_height_map if color_height_map else {},
+                default_height=spacer_thick,
+                structure_mode=structure_mode,
+                backing_color_id=backing_color_id,
+                pixel_scale=pixel_scale,
+                height_matrix=heightmap_height_matrix
+            )
+        elif enable_relief and height_mode == "color" and color_height_map:
+            print(f"[CONVERTER] 2.5D Relief Mode ENABLED")
             print(f"[CONVERTER] Color height map: {color_height_map}")
             
             # Build relief voxel matrix with per-color heights
@@ -644,9 +1019,12 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             total_layers = full_matrix.shape[0]
             print(f"[CONVERTER] Fallback successful: {full_matrix.shape} (Z×H×W)")
         except Exception as fallback_error:
-            return None, None, None, f"❌ Voxel matrix generation failed: {fallback_error}"
+            return None, None, None, f"[ERROR] Voxel matrix generation failed: {fallback_error}", None
     
     # Step 6: Generate 3D Meshes
+    _prog(0.30, "生成 3D 网格中... | Generating meshes...")
+    _mesh_t0 = time.perf_counter() if _bench_enabled else None
+    
     scene = trimesh.Scene()
     
     transform = np.eye(4)
@@ -663,27 +1041,48 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     num_materials = len(slot_names)
     print(f"[CONVERTER] Generating meshes for {num_materials} materials...")
 
+    max_workers = min(4, num_materials)
+    parallel_enabled = max_workers > 1 and os.getenv("LUMINA_DISABLE_PARALLEL_MESH", "0") != "1"
+    mesh_results = {}
+    mesh_errors = {}
+    if parallel_enabled:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(mesher.generate_mesh, full_matrix, mat_id, target_h): mat_id
+                for mat_id in range(num_materials)
+            }
+            for future in as_completed(future_map):
+                mat_id = future_map[future]
+                try:
+                    mesh_results[mat_id] = future.result()
+                except Exception as e:
+                    mesh_errors[mat_id] = e
+    else:
+        for mat_id in range(num_materials):
+            try:
+                mesh_results[mat_id] = mesher.generate_mesh(full_matrix, mat_id, target_h)
+            except Exception as e:
+                mesh_errors[mat_id] = e
+
     for mat_id in range(num_materials):
-        try:
-            mesh = mesher.generate_mesh(full_matrix, mat_id, target_h)
-            if mesh:
-                # [ROLLBACK] Removed smart simplification as per user request
-                # Warning: Large models may produce huge 3MF files
-                mesh.apply_transform(transform)
-                mesh.visual.face_colors = preview_colors[mat_id]
-                name = slot_names[mat_id]
-                mesh.metadata['name'] = name
-                scene.add_geometry(
-                    mesh, 
-                    node_name=name, 
-                    geom_name=name
-                )
-                valid_slot_names.append(name)
-                print(f"[CONVERTER] Added mesh for {name}")
-        except Exception as e:
-            # Log error and continue with other materials (Requirement 8.1)
+        if mat_id in mesh_errors:
+            e = mesh_errors[mat_id]
             print(f"[CONVERTER] Error generating mesh for material {mat_id} ({slot_names[mat_id]}): {e}")
             print(f"[CONVERTER] Continuing with other materials...")
+            continue
+        mesh = mesh_results.get(mat_id)
+        if mesh:
+            mesh.apply_transform(transform)
+            mesh.visual.face_colors = preview_colors[mat_id]
+            name = slot_names[mat_id]
+            mesh.metadata['name'] = name
+            scene.add_geometry(
+                mesh, 
+                node_name=name, 
+                geom_name=name
+            )
+            valid_slot_names.append(name)
+            print(f"[CONVERTER] Added mesh for {name}")
     
     # Conditionally generate backing mesh (only when separate_backing=True)
     # Error handling for backing mesh generation (Requirement 8.1, 8.3)
@@ -784,6 +1183,8 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 except Exception as e:
                     print(f"[CONVERTER]   Error extracting free color {hex_c}: {e}")
     
+    _hifi_timings['mesh_gen_s'] = time.perf_counter() - _mesh_t0
+    
     # Step 7: Add Keychain Loop
     loop_added = False
     
@@ -819,9 +1220,22 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             coating_layers = max(1, int(round(coating_height_mm / PrinterConfig.LAYER_HEIGHT)))
             print(f"[CONVERTER] 🪟 Generating coating: height={coating_height_mm}mm ({coating_layers} layers), bottom side")
 
+            # Determine coating coverage area
+            coating_mask = mask_solid.copy()
+            
+            # [FIX] If outline is enabled, extend coating to cover outline area as well
+            if enable_outline:
+                print(f"[CONVERTER] 🔲 Extending coating to cover outline area (width={outline_width}mm)")
+                # Dilate mask to include outline area
+                outline_width_px = max(1, int(round(outline_width / pixel_scale)))
+                kernel = np.ones((3, 3), np.uint8)
+                mask_uint8 = mask_solid.astype(np.uint8) * 255
+                dilated_mask = cv2.dilate(mask_uint8, kernel, iterations=outline_width_px)
+                coating_mask = (dilated_mask > 0)
+
             # Build a small voxel matrix for the coating: coating_layers × H × W
             coating_matrix = np.full((coating_layers, target_h, target_w), -1, dtype=int)
-            coating_slice = np.where(mask_solid, 0, -1).astype(int)
+            coating_slice = np.where(coating_mask, 0, -1).astype(int)
             coating_matrix[:] = coating_slice[np.newaxis, :, :]
 
             coating_mesh = mesher.generate_mesh(coating_matrix, 0, target_h)
@@ -860,6 +1274,8 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 coating_mm = coating_layers * PrinterConfig.LAYER_HEIGHT
                 outline_thickness_mm += coating_mm
                 outline_z_offset = -coating_mm
+                print(f"[CONVERTER] 🔲 Outline extended to cover coating: total_thickness={outline_thickness_mm}mm")
+            
             print(f"[CONVERTER] 🔲 Generating outline: width={outline_width}mm, thickness={outline_thickness_mm}mm (z_offset={outline_z_offset}mm)")
             
             outline_mesh = _generate_outline_mesh(
@@ -890,8 +1306,26 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             traceback.print_exc()
     
     # ========== Step 8: Export 3MF ==========
-    # 单面模式需要 X 轴镜像修正，使 3MF 输出与预览/GLB 一致
     is_single_sided = "单面" in structure_mode or "Single" in structure_mode
+    is_5color = "5-Color Extended" in color_mode
+
+    # 5-Color 高保真：体素 Z 与 BambuStudio 显示约定相反，需 Z 翻转使顶面（观看面）朝上
+    if is_5color:
+        max_z = max(
+            g.vertices[:, 2].max()
+            for g in scene.geometry.values()
+            if hasattr(g, "vertices") and len(g.vertices) > 0
+        )
+        z_flip = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, -1, max_z],
+            [0, 0, 0, 1],
+        ])
+        for geom_name in list(scene.geometry.keys()):
+            scene.geometry[geom_name].apply_transform(z_flip)
+
+    # 单面模式：X 轴镜像修正（BambuStudio writer 需要）
     if is_single_sided:
         model_width_mm = target_w * pixel_scale
         mirror_transform = np.array([
@@ -902,6 +1336,21 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         ])
         for geom_name in list(scene.geometry.keys()):
             scene.geometry[geom_name].apply_transform(mirror_transform)
+
+    # 5-Color 高保真：单面 X 镜像后左右仍反，再补一次 X 镜像使左右正确
+    if is_5color:
+        model_width_mm = target_w * pixel_scale
+        x_mirror_again = np.array([
+            [-1, 0, 0, model_width_mm],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        for geom_name in list(scene.geometry.keys()):
+            scene.geometry[geom_name].apply_transform(x_mirror_again)
+
+    _prog(0.50, "导出 3MF 中... | Exporting 3MF...")
+    _export_t0 = time.perf_counter() if _bench_enabled else None
     
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     out_path = os.path.join(OUTPUT_DIR, generate_model_filename(base_name, modeling_mode, color_mode))
@@ -909,24 +1358,84 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Check if scene has any geometry before exporting (Requirement 8.1)
     if len(scene.geometry) == 0:
         print(f"[CONVERTER] Error: No meshes generated, cannot export 3MF")
-        return None, None, None, "❌ Mesh generation failed: No valid meshes generated"
+        return None, None, None, "[ERROR] Mesh generation failed: No valid meshes generated", None
+    
+    # BambuStudio print settings
+    print_settings = {
+        'layer_height': '0.08',
+        'initial_layer_height': '0.08',
+        'wall_loops': '1',
+        'top_shell_layers': '0',
+        'bottom_shell_layers': '0',
+        'sparse_infill_density': '100%',
+        'sparse_infill_pattern': 'zig-zag',
+        'nozzle_temperature': ['220'] * 8,
+        'bed_temperature': ['60'] * 8,
+        'filament_type': ['PLA'] * 8,
+        'print_speed': '100',
+        'travel_speed': '150',
+        'enable_support': '0',
+        'brim_width': '5',
+        'brim_type': 'auto_brim',
+    }
     
     try:
-        scene.export(out_path)
-        safe_fix_3mf_names(out_path, valid_slot_names)
-        print(f"[CONVERTER] 3MF exported: {out_path}")
+        print(f"[CONVERTER] Exporting with BambuStudio metadata...")
+        export_scene_with_bambu_metadata(
+            scene=scene,
+            output_path=out_path,
+            slot_names=valid_slot_names,
+            preview_colors=preview_colors,
+            settings=print_settings,
+            color_mode=color_mode
+        )
+        _hifi_timings['export_3mf_s'] = time.perf_counter() - _export_t0
+        print(f"[CONVERTER] 3MF exported with embedded settings: {out_path}")
     except Exception as e:
         print(f"[CONVERTER] Error exporting 3MF: {e}")
-        return None, None, None, f"❌ 3MF export failed: {e}"
+        return None, None, None, f"[ERROR] 3MF export failed: {e}", None
+    
+    # Step 8.5: Generate Color Recipe Report
+    color_recipe_path = None
+    recipe_policy = os.getenv("LUMINA_COLOR_RECIPE_POLICY", "auto").strip().lower()
+    try:
+        recipe_auto_max_pixels = int(os.getenv("LUMINA_COLOR_RECIPE_AUTO_MAX_PIXELS", "1200000"))
+    except Exception:
+        recipe_auto_max_pixels = 1200000
+    solid_pixels = int(np.count_nonzero(mask_solid))
+    enable_recipe = recipe_policy == "on" or (
+        recipe_policy == "auto" and solid_pixels <= recipe_auto_max_pixels
+    )
+    if enable_recipe:
+        try:
+            from utils.color_recipe_logger import ColorRecipeLogger
+
+            model_filename = os.path.basename(out_path)
+            color_recipe_path = ColorRecipeLogger.create_from_processor(
+                processor=processor,
+                output_dir=OUTPUT_DIR,
+                model_filename=model_filename,
+                matched_rgb=matched_rgb,
+                material_matrix=material_matrix,
+                mask_solid=mask_solid
+            )
+        except Exception as e:
+            print(f"[CONVERTER] Warning: Failed to generate color recipe report: {e}")
+    else:
+        print(
+            f"[CONVERTER] Skipping color recipe report: policy={recipe_policy}, "
+            f"solid_pixels={solid_pixels}, auto_max={recipe_auto_max_pixels}"
+        )
     
     # Step 9: Generate 3D Preview
+    _prog(0.90, "生成 3D 预览中... | Generating 3D preview...")
     preview_mesh = _create_preview_mesh(
         matched_rgb, mask_solid, total_layers,
         backing_color_id=backing_color_id,
         backing_z_range=backing_metadata['backing_z_range'],
         preview_colors=preview_colors
     )
-    
+
     if preview_mesh:
         preview_mesh.apply_transform(transform)
         
@@ -1001,8 +1510,27 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Step 10: Generate Status Message
     Stats.increment("conversions")
     
+    # Output detailed timing for HiFi mode
+    if _hifi_timings:
+        image_proc_s = _hifi_timings.get('image_proc_s', 0.0)
+        mesh_gen_s = _hifi_timings.get('mesh_gen_s', 0.0)
+        export_3mf_s = _hifi_timings.get('export_3mf_s', 0.0)
+        total_s = image_proc_s + mesh_gen_s + export_3mf_s
+        print(
+            "[CONVERTER] HiFi timings (s): "
+            f"image_proc={image_proc_s:.3f}, "
+            f"mesh_gen={mesh_gen_s:.3f}, "
+            f"export_3mf={export_3mf_s:.3f}, "
+            f"total={total_s:.3f}"
+        )
+    
     mode_name = mode_info['mode'].get_display_name()
     msg = f"✅ Conversion complete ({mode_name})! Resolution: {target_w}×{target_h}px"
+    
+    # 高度图统计信息输出
+    if heightmap_stats is not None:
+        msg += (f" | 📊 高度图: {heightmap_stats['min_mm']:.1f}mm ~ "
+                f"{heightmap_stats['max_mm']:.1f}mm (avg {heightmap_stats['avg_mm']:.1f}mm)")
     
     if loop_added:
         msg += f" | Loop: {slot_names[loop_info['color_id']]}"
@@ -1013,7 +1541,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     elif glb_path and total_pixels > 500_000:
         msg += " | ℹ️ 3D preview simplified"
     
-    return out_path, glb_path, preview_img, msg
+    return out_path, glb_path, preview_img, msg, color_recipe_path
 
 
 
@@ -1063,14 +1591,27 @@ def _generate_outline_mesh(mask_solid, pixel_scale, outline_width_mm, outline_th
     
     print(f"[OUTLINE] Width: {outline_width_mm}mm = {outline_width_px}px, Thickness: {outline_thickness_mm}mm = {outline_layers} layers")
     
-    # Dilate the mask outward
-    kernel = np.ones((3, 3), np.uint8)
+    # [FIX] Pad the mask before dilation so edges touching image boundaries
+    # can still expand outward. Without padding, cv2.dilate treats the border
+    # as zeros and the outline ring is missing on boundary-touching sides.
+    pad = outline_width_px + 1
     mask_uint8 = mask_solid.astype(np.uint8) * 255
-    dilated = cv2.dilate(mask_uint8, kernel, iterations=outline_width_px)
-    dilated_mask = dilated > 0
+    padded_mask = cv2.copyMakeBorder(mask_uint8, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
     
-    # Ring = dilated minus original
-    ring_mask = dilated_mask & ~mask_solid
+    # Dilate the padded mask outward
+    kernel = np.ones((3, 3), np.uint8)
+    dilated = cv2.dilate(padded_mask, kernel, iterations=outline_width_px)
+    
+    # Also pad the original mask for subtraction
+    padded_original = cv2.copyMakeBorder(mask_uint8, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    
+    # Ring = dilated minus original (in padded space, preserving outline beyond image edges)
+    ring_mask = (dilated > 0) & ~(padded_original > 0)
+    
+    # Use padded dimensions for mesh generation; offset coordinates by -pad later
+    h, w = ring_mask.shape
+    # h_original is needed for Y-flip coordinate conversion
+    h_original = mask_solid.shape[0]
     
     if not np.any(ring_mask):
         print(f"[OUTLINE] Ring mask is empty, skipping")
@@ -1080,7 +1621,7 @@ def _generate_outline_mesh(mask_solid, pixel_scale, outline_width_mm, outline_th
     print(f"[OUTLINE] Ring mask: {ring_pixel_count} pixels")
     
     # Use greedy rectangle merging to generate optimized mesh
-    h, w = ring_mask.shape
+    # Note: h, w are padded dimensions; use pad offset for world coordinates
     processed = np.zeros_like(ring_mask, dtype=bool)
     vertices = []
     faces = []
@@ -1113,10 +1654,11 @@ def _generate_outline_mesh(mask_solid, pixel_scale, outline_width_mm, outline_th
             processed[y:y_end, x_start:x_end] = True
             
             # Convert to world coordinates (flip Y, apply scale)
-            world_x0 = float(x_start) * pixel_scale
-            world_x1 = float(x_end) * pixel_scale
-            world_y0 = float(h - y_end) * pixel_scale
-            world_y1 = float(h - y) * pixel_scale
+            # Subtract pad offset so coordinates align with the original (unpadded) model
+            world_x0 = float(x_start - pad) * pixel_scale
+            world_x1 = float(x_end - pad) * pixel_scale
+            world_y0 = float(h_original - (y_end - pad)) * pixel_scale
+            world_y1 = float(h_original - (y - pad)) * pixel_scale
             z_bot = 0.0
             z_tp = float(outline_layers) * PrinterConfig.LAYER_HEIGHT
             
@@ -1348,8 +1890,8 @@ def generate_auto_height_map(color_list, mode, base_thickness, max_relief_height
             # Keep the ratio as is: 0 -> 0, 1 -> 1
             ratio = normalized
         
-        # Calculate final height
-        height = base_thickness + ratio * delta_z
+        # Calculate final height (minimum 0.08mm = 1 layer height)
+        height = max(0.08, base_thickness + ratio * delta_z)
         
         # Round to 0.1mm precision
         color_height_map[color] = round(height, 1)
@@ -1364,12 +1906,14 @@ def generate_auto_height_map(color_list, mode, base_thickness, max_relief_height
 
 
 def _build_relief_voxel_matrix(matched_rgb, material_matrix, mask_solid, color_height_map,
-                               default_height, structure_mode, backing_color_id, pixel_scale):
+                               default_height, structure_mode, backing_color_id, pixel_scale,
+                               height_matrix=None):
     """
-    Build 2.5D relief voxel matrix with per-color variable heights.
+    Build 2.5D relief voxel matrix with per-color or per-pixel variable heights.
     
-    This function creates a voxel matrix where different colors have different Z heights,
-    while preserving the top 5 layers (0.4mm) for optical color mixing.
+    Supports two modes:
+    1. Color height map mode (default): heights assigned by color
+    2. Heightmap mode: heights from external grayscale heightmap (per-pixel)
     
     Physical Model:
     - Each color region has its own target height (Target_Z)
@@ -1381,16 +1925,14 @@ def _build_relief_voxel_matrix(matched_rgb, material_matrix, mask_solid, color_h
         material_matrix: (H, W, 5) material matrix for optical layers
         mask_solid: (H, W) boolean mask of solid pixels
         color_height_map: dict mapping hex colors to heights in mm
-                         e.g., {'#ff0000': 4.0, '#00ff00': 2.5}
         default_height: default height in mm for colors not in map
         structure_mode: "Double-sided" or "Single-sided"
         backing_color_id: backing material ID (0-7)
         pixel_scale: mm per pixel
+        height_matrix: optional (H, W) float32 per-pixel height matrix from heightmap
     
     Returns:
         tuple: (full_matrix, backing_metadata)
-            - full_matrix: (Z, H, W) voxel matrix with variable heights
-            - backing_metadata: dict with backing info
     """
     target_h, target_w = material_matrix.shape[:2]
     
@@ -1401,61 +1943,77 @@ def _build_relief_voxel_matrix(matched_rgb, material_matrix, mask_solid, color_h
     print(f"[RELIEF] Building 2.5D relief voxel matrix...")
     print(f"[RELIEF] Optical layer thickness: {OPTICAL_THICKNESS_MM}mm ({OPTICAL_LAYERS} layers)")
     
-    # Step 1: Create color-to-height mapping for each pixel
-    # Convert matched_rgb to hex colors
-    height_matrix = np.full((target_h, target_w), default_height, dtype=np.float32)
-    
-    for y in range(target_h):
-        for x in range(target_w):
-            if not mask_solid[y, x]:
-                continue
-            
-            r, g, b = matched_rgb[y, x]
-            hex_color = f'#{r:02x}{g:02x}{b:02x}'
-            
-            if hex_color in color_height_map:
-                height_matrix[y, x] = color_height_map[hex_color]
+    # Step 1: Build per-pixel height matrix
+    if height_matrix is not None:
+        # Heightmap mode: use provided per-pixel height matrix
+        print(f"[RELIEF] 🗺️ 使用高度图模式（逐像素高度）")
+        pixel_heights = height_matrix.copy()
+        # Clamp: pixel height < optical thickness → set to optical thickness
+        pixel_heights[mask_solid & (pixel_heights < OPTICAL_THICKNESS_MM)] = OPTICAL_THICKNESS_MM
+    else:
+        # Color height map mode: assign heights by color
+        pixel_heights = np.full((target_h, target_w), default_height, dtype=np.float32)
+        for y in range(target_h):
+            for x in range(target_w):
+                if not mask_solid[y, x]:
+                    continue
+                r, g, b = matched_rgb[y, x]
+                hex_color = f'#{r:02x}{g:02x}{b:02x}'
+                if hex_color in color_height_map:
+                    pixel_heights[y, x] = color_height_map[hex_color]
     
     # Step 2: Calculate max height to determine total Z layers
-    max_height_mm = np.max(height_matrix[mask_solid]) if np.any(mask_solid) else default_height
+    max_height_mm = np.max(pixel_heights[mask_solid]) if np.any(mask_solid) else default_height
     max_z_layers = max(OPTICAL_LAYERS + 1, int(np.ceil(max_height_mm / PrinterConfig.LAYER_HEIGHT)))
     
     print(f"[RELIEF] Max height: {max_height_mm:.2f}mm ({max_z_layers} layers)")
-    print(f"[RELIEF] Height range: {np.min(height_matrix[mask_solid]):.2f}mm - {max_height_mm:.2f}mm")
+    if np.any(mask_solid):
+        print(f"[RELIEF] Height range: {np.min(pixel_heights[mask_solid]):.2f}mm - {max_height_mm:.2f}mm")
     
     # Step 3: Initialize voxel matrix
     full_matrix = np.full((max_z_layers, target_h, target_w), -1, dtype=int)
     
-    # Step 4: Fill voxel matrix pixel by pixel
-    for y in range(target_h):
-        for x in range(target_w):
-            if not mask_solid[y, x]:
-                continue
-            
-            # Get target height for this pixel
-            target_height_mm = height_matrix[y, x]
-            target_z_layers = int(np.ceil(target_height_mm / PrinterConfig.LAYER_HEIGHT))
-            target_z_layers = max(OPTICAL_LAYERS, min(target_z_layers, max_z_layers))
-            
-            # Calculate base and optical layer ranges
-            optical_start_z = target_z_layers - OPTICAL_LAYERS
-            optical_end_z = target_z_layers
-            
-            # Fill base layers (Z=0 to optical_start_z) with backing color
-            for z in range(optical_start_z):
-                full_matrix[z, y, x] = backing_color_id
-            
-            # Fill optical layers (optical_start_z to optical_end_z) with material layers
-            # IMPORTANT: Reverse order - layer 0 should be at the bottom (观赏面朝上)
-            for layer_idx in range(OPTICAL_LAYERS):
-                z = optical_start_z + layer_idx
+    # Step 4: Fill voxel matrix
+    if height_matrix is not None:
+        # Vectorized fill for heightmap mode (much faster for large images)
+        target_z_layers = np.ceil(pixel_heights / PrinterConfig.LAYER_HEIGHT).astype(int)
+        target_z_layers = np.clip(target_z_layers, OPTICAL_LAYERS, max_z_layers)
+        optical_start_z = target_z_layers - OPTICAL_LAYERS
+        
+        # Fill backing layers
+        for z in range(max_z_layers):
+            backing_mask = mask_solid & (z < optical_start_z)
+            full_matrix[z][backing_mask] = backing_color_id
+        
+        # Fill optical layers
+        solid_ys, solid_xs = np.where(mask_solid)
+        for layer_idx in range(OPTICAL_LAYERS):
+            z_positions = optical_start_z + layer_idx
+            for i in range(len(solid_ys)):
+                y, x = solid_ys[i], solid_xs[i]
+                z = z_positions[y, x]
                 if z < max_z_layers:
-                    # Reverse: layer 0 (bottom) -> z=optical_start_z, layer 4 (top) -> z=optical_end_z-1
                     mat_id = material_matrix[y, x, OPTICAL_LAYERS - 1 - layer_idx]
                     full_matrix[z, y, x] = mat_id
+    else:
+        # Original per-pixel loop for color height map mode
+        for y in range(target_h):
+            for x in range(target_w):
+                if not mask_solid[y, x]:
+                    continue
+                target_height_mm = max(0.08, pixel_heights[y, x])
+                target_z_layers_px = int(np.ceil(target_height_mm / PrinterConfig.LAYER_HEIGHT))
+                target_z_layers_px = max(OPTICAL_LAYERS, min(target_z_layers_px, max_z_layers))
+                optical_start_z_px = target_z_layers_px - OPTICAL_LAYERS
+                for z in range(optical_start_z_px):
+                    full_matrix[z, y, x] = backing_color_id
+                for layer_idx in range(OPTICAL_LAYERS):
+                    z = optical_start_z_px + layer_idx
+                    if z < max_z_layers:
+                        mat_id = material_matrix[y, x, OPTICAL_LAYERS - 1 - layer_idx]
+                        full_matrix[z, y, x] = mat_id
     
     # Step 5: Relief mode is always single-sided (观赏面朝上)
-    # Double-sided mode doesn't make sense for relief - the viewing surface is on top
     backing_z_range = (0, max_z_layers - OPTICAL_LAYERS - 1)
     
     backing_metadata = {
@@ -1548,7 +2106,7 @@ def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mod
     Build complete voxel matrix with backing layer marked using special material_id.
     
     Args:
-        material_matrix: (H, W, 5) material matrix
+        material_matrix: (H, W, N) material matrix (N optical layers)
         mask_solid: (H, W) solid pixel mask
         spacer_thick: backing thickness (mm)
         structure_mode: "双面" or "单面" (Double-sided or Single-sided)
@@ -1561,7 +2119,9 @@ def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mod
                 - 'backing_color_id': int
                 - 'backing_z_range': tuple (start_z, end_z)
     """
-    target_h, target_w = material_matrix.shape[:2]
+    if material_matrix.ndim != 3:
+        raise ValueError(f"material_matrix must be 3D (H, W, N), got shape={material_matrix.shape}")
+    target_h, target_w, optical_layers = material_matrix.shape
     mask_transparent = ~mask_solid
     
     bottom_voxels = np.transpose(material_matrix, (2, 0, 1))
@@ -1570,33 +2130,33 @@ def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mod
     
     if "双面" in structure_mode or "Double" in structure_mode:
         top_voxels = np.transpose(material_matrix[..., ::-1], (2, 0, 1))
-        total_layers = 5 + spacer_layers + 5
+        total_layers = optical_layers + spacer_layers + optical_layers
         full_matrix = np.full((total_layers, target_h, target_w), -1, dtype=int)
         
-        full_matrix[0:5] = bottom_voxels
+        full_matrix[0:optical_layers] = bottom_voxels
         
         # Use backing_color_id parameter to mark backing layer
         spacer = np.full((target_h, target_w), -1, dtype=int)
         spacer[~mask_transparent] = backing_color_id
-        for z in range(5, 5 + spacer_layers):
+        for z in range(optical_layers, optical_layers + spacer_layers):
             full_matrix[z] = spacer
         
-        full_matrix[5 + spacer_layers:] = top_voxels
+        full_matrix[optical_layers + spacer_layers:] = top_voxels
         
-        backing_z_range = (5, 5 + spacer_layers - 1)
+        backing_z_range = (optical_layers, optical_layers + spacer_layers - 1)
     else:
-        total_layers = 5 + spacer_layers
+        total_layers = optical_layers + spacer_layers
         full_matrix = np.full((total_layers, target_h, target_w), -1, dtype=int)
         
-        full_matrix[0:5] = bottom_voxels
+        full_matrix[0:optical_layers] = bottom_voxels
         
         # Use backing_color_id parameter to mark backing layer
         spacer = np.full((target_h, target_w), -1, dtype=int)
         spacer[~mask_transparent] = backing_color_id
-        for z in range(5, total_layers):
+        for z in range(optical_layers, total_layers):
             full_matrix[z] = spacer
         
-        backing_z_range = (5, total_layers - 1)
+        backing_z_range = (optical_layers, total_layers - 1)
     
     backing_metadata = {
         'backing_color_id': backing_color_id,
@@ -1604,6 +2164,71 @@ def _build_voxel_matrix(material_matrix, mask_solid, spacer_thick, structure_mod
     }
     
     return full_matrix, backing_metadata
+
+
+def _build_voxel_matrix_6layer(material_matrix, mask_solid, spacer_thick, structure_mode, backing_color_id=0):
+    """
+    Build complete voxel matrix for 6-layer structures (5-Color Extended mode).
+    
+    Args:
+        material_matrix: (H, W, 6) material matrix for 6 layers
+        mask_solid: (H, W) solid pixel mask
+        spacer_thick: backing thickness (mm)
+        structure_mode: "双面" or "单面" (Double-sided or Single-sided)
+        backing_color_id: backing material ID (0-7), default is 0 (White)
+    
+    Returns:
+        tuple: (full_matrix, backing_metadata)
+            - full_matrix: (Z, H, W) voxel matrix
+            - backing_metadata: dict with keys:
+                - 'backing_color_id': int
+                - 'backing_z_range': tuple (start_z, end_z)
+    """
+    return _build_voxel_matrix(
+        material_matrix, mask_solid, spacer_thick, structure_mode, backing_color_id=backing_color_id
+    )
+
+
+def _build_voxel_matrix_faceup(material_matrix, mask_solid, spacer_thick, backing_color_id=0):
+    """
+    Face-up voxel matrix for 5-Color Extended mode.
+
+    Orientation: backing at the bottom (print-bed side), viewing surface at the
+    top.  The model is printed right-side-up — no post-print flipping required.
+
+    material_matrix convention (top-to-bottom):
+        index 0 = viewing surface (outermost)
+        index N-1 = near backing (innermost)
+
+    For base 1024 stacks, index 0 = -1 (air padding) so their viewing surface
+    sits 1 Z below the extended stacks, keeping each Z ≤ 4 materials.
+
+    Layer structure (bottom → top, Z ascending):
+        Z = 0 .. spacer-1  : Solid backing (backing_color_id)
+        Z = spacer .. +5   : Optical layers (reversed: index N-1 → lowest Z,
+                             index 0 → highest Z)
+        -1 values stay as air in the voxel matrix.
+    """
+    target_h, target_w, optical_layers = material_matrix.shape
+    spacer_layers = max(1, int(round(spacer_thick / PrinterConfig.LAYER_HEIGHT)))
+    total_layers = spacer_layers + optical_layers
+    full_matrix = np.full((total_layers, target_h, target_w), -1, dtype=int)
+
+    # Backing: solid block at the bottom
+    spacer = np.where(mask_solid, backing_color_id, -1).astype(int)
+    full_matrix[:spacer_layers] = spacer[np.newaxis, :, :]
+
+    # Optical: reversed order so index 0 (viewing surface) → highest Z
+    for i in range(optical_layers):
+        layer = material_matrix[:, :, optical_layers - 1 - i]
+        z = spacer_layers + i
+        full_matrix[z] = np.where(mask_solid, layer, -1)
+
+    backing_z_range = (0, spacer_layers - 1)
+    return full_matrix, {
+        'backing_color_id': backing_color_id,
+        'backing_z_range': backing_z_range,
+    }
 
 
 def _create_bed_mesh(bed_w_mm, bed_h_mm, is_dark=True):
@@ -1922,7 +2547,7 @@ def generate_realtime_glb(cache):
         transform[1, 1] = pixel_scale
         transform[2, 2] = PrinterConfig.LAYER_HEIGHT
         preview_mesh.apply_transform(transform)
-        
+
         # Add bed platform
         model_w_mm = target_w * pixel_scale
         model_h_mm = target_h * pixel_scale
@@ -1986,19 +2611,19 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         tuple: (preview_image, cache_data, status_message)
     """
     if image_path is None:
-        return None, None, "❌ Please upload an image"
+        return None, None, "[ERROR] Please upload an image"
     if lut_path is None:
-        return None, None, "⚠️ Please select or upload calibration file"
+        return None, None, "[WARNING] Please select or upload calibration file"
     
     if isinstance(lut_path, str):
         actual_lut_path = lut_path
     elif hasattr(lut_path, 'name'):
         actual_lut_path = lut_path.name
     else:
-        return None, None, "❌ Invalid LUT file format"
+        return None, None, "[ERROR] Invalid LUT file format"
 
     # Handle None modeling_mode with default
-    if modeling_mode is None:
+    if modeling_mode is None or modeling_mode == "none":
         modeling_mode = ModelingMode.HIGH_FIDELITY
         print("[CONVERTER] Warning: modeling_mode was None, using default HIGH_FIDELITY")
     else:
@@ -2023,7 +2648,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
             smooth_sigma=10
         )
     except Exception as e:
-        return None, None, f"❌ Preview generation failed: {e}"
+        return None, None, f"[ERROR] Preview generation failed: {e}"
     
     matched_rgb = result['matched_rgb']
     material_matrix = result['material_matrix']
@@ -2043,11 +2668,17 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         'matched_rgb': matched_rgb,
         'preview_rgba': preview_rgba.copy(),
         'color_conf': color_conf,
+        'color_mode': color_mode,
         'quantize_colors': quantize_colors,
         'backing_color_id': backing_color_id,
         'is_dark': is_dark,
         'bed_label': BedManager.DEFAULT_BED
     }
+
+    # 统一缓存契约：保证 quantized_image 始终可用
+    cache['debug_data'] = result.get('debug_data') if isinstance(result, dict) else None
+    cache['quantized_image'] = result.get('quantized_image')
+    _ensure_quantized_image_in_cache(cache)
     
     # Extract color palette from cache
     color_palette = extract_color_palette(cache)
@@ -2059,7 +2690,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
     )
     
     num_colors = len(color_palette)
-    return display, cache, f"✅ Preview ({target_w}×{target_h}px, {num_colors} colors) | Click image to place loop"
+    return display, cache, f"[OK] Preview ({target_w}×{target_h}px, {num_colors} colors) | Click image to place loop"
 
 
 def render_preview(preview_rgba, loop_pos, loop_width, loop_length, 
@@ -2341,14 +2972,17 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
                         structure_mode, auto_bg, bg_tol, color_mode,
                         add_loop, loop_width, loop_length, loop_hole, loop_pos,
                         modeling_mode=ModelingMode.VECTOR, quantize_colors=64,
-                        color_replacements=None, backing_color_name="White",
+                        color_replacements=None, replacement_regions=None, backing_color_name="White",
                         separate_backing=False, enable_relief=False, color_height_map=None,
+                        height_mode: str = "color",
+                        heightmap_path=None, heightmap_max_height=None,
                         enable_cleanup=True,
                         enable_outline=False, outline_width=2.0,
                         enable_cloisonne=False, wire_width_mm=0.4,
                         wire_height_mm=0.4,
                         free_color_set=None,
-                        enable_coating=False, coating_height_mm=0.08):
+                        enable_coating=False, coating_height_mm=0.08,
+                        progress=None):
     """
     Wrapper function for generating final model.
     
@@ -2362,6 +2996,7 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         backing_color_name: Name of backing color (e.g., "White", "Cyan")
                            Will be converted to material ID based on color_mode
         separate_backing: Boolean flag to separate backing as individual object (default: False)
+        height_mode: "color" or "heightmap", determines relief branch selection
     """
     # Convert backing color name to ID or use special marker for separate backing
     # Error handling for separate_backing parameter (Requirement 8.4)
@@ -2391,10 +3026,14 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         blur_kernel=0,
         smooth_sigma=10,
         color_replacements=color_replacements,
+        replacement_regions=replacement_regions,
         backing_color_id=backing_color_id,
         separate_backing=separate_backing,
         enable_relief=enable_relief,
         color_height_map=color_height_map,
+        height_mode=height_mode,
+        heightmap_path=heightmap_path,
+        heightmap_max_height=heightmap_max_height,
         enable_cleanup=enable_cleanup,
         enable_outline=enable_outline,
         outline_width=outline_width,
@@ -2403,7 +3042,8 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         wire_height_mm=wire_height_mm,
         free_color_set=free_color_set,
         enable_coating=enable_coating,
-        coating_height_mm=coating_height_mm
+        coating_height_mm=coating_height_mm,
+        progress=progress,
     )
 
 
@@ -2436,7 +3076,7 @@ def update_preview_with_backing_color(cache, backing_color_id: int):
         - Requirements 8.4: Returns error message and keeps current preview on failure
     """
     if cache is None:
-        return None, "⚠️ Error: Cache cannot be None"
+        return None, "[WARNING] Error: Cache cannot be None"
     
     try:
         # Validate backing_color_id
@@ -2529,16 +3169,17 @@ def update_preview_with_backing_color(cache, backing_color_id: int):
         print(f"[CONVERTER] Error updating preview with backing color: {e}")
         # Return original preview from cache if available
         original_preview = cache.get('preview_rgba') if cache else None
-        return original_preview, f"⚠️ Preview update failed: {str(e)}. Showing original preview."
+        return original_preview, f"[WARNING] Preview update failed: {str(e)}. Showing original preview."
 
 
-def update_preview_with_replacements(cache, color_replacements: dict, 
+def update_preview_with_replacements(cache, replacement_regions=None,
                                      loop_pos=None, add_loop=False,
-                                     loop_width=4, loop_length=8, 
+                                     loop_width=4, loop_length=8,
                                      loop_hole=2.5, loop_angle=0,
-                                     lang: str = "zh"):
+                                     lang: str = "zh",
+                                     merge_map: dict = None):
     """
-    Update preview image with color replacements applied.
+    Update preview image with color replacements and optional color merging applied.
     
     This function applies color replacements to the cached preview data
     without re-processing the entire image. It's designed for fast
@@ -2554,6 +3195,9 @@ def update_preview_with_replacements(cache, color_replacements: dict,
         loop_length: Loop length in mm
         loop_hole: Loop hole diameter in mm
         loop_angle: Loop rotation angle in degrees
+        merge_map: Optional dict mapping source hex to target hex colors for merging
+                  (applied before color_replacements)
+        lang: Language code
     
     Returns:
         tuple: (display_image, updated_cache, palette_html)
@@ -2561,21 +3205,33 @@ def update_preview_with_replacements(cache, color_replacements: dict,
     if cache is None:
         return None, None, ""
     
-    from core.color_replacement import ColorReplacementManager
-    
     # Get original matched_rgb (use stored original if available)
     original_rgb = cache.get('original_matched_rgb', cache['matched_rgb'])
     mask_solid = cache['mask_solid']
     color_conf = cache['color_conf']
     backing_color_id = cache.get('backing_color_id', 0)  # Handle old cache versions
     target_h, target_w = original_rgb.shape[:2]
-    
-    # Apply color replacements if any
-    if color_replacements:
-        manager = ColorReplacementManager.from_dict(color_replacements)
-        matched_rgb = manager.apply_to_image(original_rgb)
-    else:
-        matched_rgb = original_rgb.copy()
+    # Start with original RGB
+    matched_rgb = original_rgb.copy()
+
+    # Apply merge map first (if provided)
+    if merge_map:
+        from core.color_merger import ColorMerger
+        from core.image_processing import LuminaImageProcessor
+
+        merger = ColorMerger(LuminaImageProcessor._rgb_to_lab)
+        matched_rgb = merger.apply_color_merging(matched_rgb, merge_map)
+
+    # Apply region replacements in-order (later items override earlier items)
+    for item in (replacement_regions or []):
+        region_mask = item.get('mask')
+        replacement_hex = item.get('replacement')
+        if region_mask is None or not replacement_hex:
+            continue
+        replacement_rgb = _hex_to_rgb_tuple(replacement_hex)
+        effective_mask = region_mask & mask_solid
+        if np.any(effective_mask):
+            matched_rgb[effective_mask] = np.array(replacement_rgb, dtype=np.uint8)
     
     # Build new preview RGBA
     preview_rgba = np.zeros((target_h, target_w, 4), dtype=np.uint8)
@@ -2607,9 +3263,28 @@ def update_preview_with_replacements(cache, color_replacements: dict,
         is_dark=cache.get('is_dark', True)
     )
     
+    # Build auto pairs (quantized -> matched) for right table display
+    auto_pairs = []
+    q_img = updated_cache.get('quantized_image')
+    if q_img is not None:
+        h, w = matched_rgb.shape[:2]
+        for y in range(h):
+            for x in range(w):
+                if not mask_solid[y, x]:
+                    continue
+                qh = _rgb_to_hex(q_img[y, x])
+                mh = _rgb_to_hex(matched_rgb[y, x])
+                auto_pairs.append({"quantized_hex": qh, "matched_hex": mh})
+
     # Generate palette HTML for display
     from ui.palette_extension import generate_palette_html
-    palette_html = generate_palette_html(color_palette, color_replacements, lang=lang)
+    palette_html = generate_palette_html(
+        color_palette,
+        replacements={},
+        lang=lang,
+        replacement_regions=replacement_regions or [],
+        auto_pairs=auto_pairs,
+    )
     
     return display, updated_cache, palette_html
 
@@ -2644,13 +3319,13 @@ def generate_highlight_preview(cache, highlight_color: str,
         tuple: (display_image, status_message)
     """
     if cache is None:
-        return None, "❌ 请先生成预览 | Generate preview first"
+        return None, "[ERROR] 请先生成预览 | Generate preview first"
     
     if not highlight_color:
         # No highlight - return normal preview
         preview_rgba = cache.get('preview_rgba')
         if preview_rgba is None:
-            return None, "❌ 缓存数据无效 | Invalid cache"
+            return None, "[ERROR] 缓存数据无效 | Invalid cache"
         
         color_conf = cache['color_conf']
         display = render_preview(
@@ -2662,7 +3337,7 @@ def generate_highlight_preview(cache, highlight_color: str,
             target_width_mm=cache.get('target_width_mm'),
             is_dark=cache.get('is_dark', True)
         )
-        return display, "✅ 预览已恢复 | Preview restored"
+        return display, "[OK] 预览已恢复 | Preview restored"
     # Parse highlight color
     highlight_hex = highlight_color.strip().lower()
     if not highlight_hex.startswith('#'):
@@ -2675,7 +3350,7 @@ def generate_highlight_preview(cache, highlight_color: str,
         b = int(highlight_hex[5:7], 16)
         highlight_rgb = np.array([r, g, b], dtype=np.uint8)
     except (ValueError, IndexError):
-        return None, f"❌ 无效的颜色值 | Invalid color: {highlight_color}"
+        return None, f"[ERROR] 无效的颜色值 | Invalid color: {highlight_color}"
     
     # Get data from cache
     matched_rgb = cache.get('matched_rgb')
@@ -2683,20 +3358,28 @@ def generate_highlight_preview(cache, highlight_color: str,
     color_conf = cache.get('color_conf')
     
     if matched_rgb is None or mask_solid is None:
-        return None, "❌ 缓存数据不完整 | Incomplete cache"
+        return None, "[ERROR] 缓存数据不完整 | Incomplete cache"
     
     target_h, target_w = matched_rgb.shape[:2]
     
     # Create highlight mask - pixels matching the highlight color
     color_match = np.all(matched_rgb == highlight_rgb, axis=2)
-    highlight_mask = color_match & mask_solid
+
+    scope = cache.get('selection_scope', 'global')
+    region_mask = cache.get('selected_region_mask')
+    highlight_mask = _resolve_highlight_mask(
+        color_match,
+        mask_solid,
+        region_mask=region_mask,
+        scope=scope,
+    )
     
     # Count highlighted pixels
     highlight_count = np.sum(highlight_mask)
     total_solid = np.sum(mask_solid)
     
     if highlight_count == 0:
-        return None, f"⚠️ 未找到颜色 {highlight_hex} | Color not found"
+        return None, f"[WARNING] 未找到颜色 {highlight_hex} | Color not found"
     
     highlight_percentage = round(highlight_count / total_solid * 100, 2)
     
@@ -2773,12 +3456,12 @@ def clear_highlight_preview(cache, loop_pos=None, add_loop=False,
     
     if cache is None:
         print("[CLEAR_HIGHLIGHT] Cache is None!")
-        return None, "❌ 请先生成预览 | Generate preview first"
+        return None, "[ERROR] 请先生成预览 | Generate preview first"
     
     preview_rgba = cache.get('preview_rgba')
     if preview_rgba is None:
         print("[CLEAR_HIGHLIGHT] preview_rgba is None!")
-        return None, "❌ 缓存数据无效 | Invalid cache"
+        return None, "[ERROR] 缓存数据无效 | Invalid cache"
     
     print(f"[CLEAR_HIGHLIGHT] preview_rgba shape: {preview_rgba.shape}")
     
@@ -2795,7 +3478,7 @@ def clear_highlight_preview(cache, loop_pos=None, add_loop=False,
     
     print(f"[CLEAR_HIGHLIGHT] display shape: {display.shape if display is not None else None}")
     
-    return display, "✅ 预览已恢复 | Preview restored"
+    return display, "[OK] 预览已恢复 | Preview restored"
 
 
 # [新增] 预览图点击吸取颜色并高亮
@@ -2807,23 +3490,23 @@ def on_preview_click_select_color(cache, evt: gr.SelectData, bed_label=None):
     3. 返回颜色信息给 UI
     """
     if cache is None:
-        return None, "未选择", None, "❌ 请先生成预览"
+        return None, "未选择", None, "[ERROR] 请先生成预览"
 
     if evt is None or evt.index is None:
-        return gr.update(), gr.update(), gr.update(), "⚠️ 无效点击"
+        return gr.update(), "未选择", None, "[WARNING] 无效点击"
 
     if bed_label is None:
         bed_label = cache.get('bed_label', BedManager.DEFAULT_BED)
 
     display_click_x, display_click_y = evt.index
-    
+
     target_w = cache.get('target_w')
     target_h = cache.get('target_h')
     target_width_mm = cache.get('target_width_mm')
-    
+
     if target_w is None or target_h is None:
-        return gr.update(), gr.update(), gr.update(), "❌ 缓存数据不完整"
-    
+        return gr.update(), "未选择", None, "[ERROR] 缓存数据不完整"
+
     bed_w_mm, bed_h_mm = BedManager.get_bed_size(bed_label)
     ppm = BedManager.compute_scale(bed_w_mm, bed_h_mm)
     margin = int(30 * ppm / 3)
@@ -2846,45 +3529,60 @@ def on_preview_click_select_color(cache, evt: gr.SelectData, bed_label=None):
 
     # _scale_preview_image fits canvas into 1200×750 box
     gradio_scale = min(1.0, 1200 / canvas_w, 750 / canvas_h)
-    
+
     canvas_click_x = display_click_x / gradio_scale
     canvas_click_y = display_click_y / gradio_scale
-    
+
     # Convert canvas coords → original image pixel coords
     mm_per_px = model_w_mm / target_w
     img_px_x = (canvas_click_x - offset_x) / (mm_per_px * ppm)
     img_px_y = (canvas_click_y - offset_y) / (mm_per_px * ppm)
-    
+
     orig_x = int(img_px_x)
     orig_y = int(img_px_y)
 
     matched_rgb = cache.get('original_matched_rgb', cache.get('matched_rgb'))
+    quantized_image = cache.get('quantized_image')
     mask_solid = cache.get('mask_solid')
-    if matched_rgb is None or mask_solid is None:
-        return None, "未选择", None, "❌ 缓存无效"
+
+    if quantized_image is None:
+        _ensure_quantized_image_in_cache(cache)
+        quantized_image = cache.get('quantized_image')
+
+    if matched_rgb is None or mask_solid is None or quantized_image is None:
+        return None, "未选择", None, "[ERROR] 缓存无效"
 
     h, w = matched_rgb.shape[:2]
 
     if not (0 <= orig_x < w and 0 <= orig_y < h):
-        return gr.update(), gr.update(), gr.update(), f"⚠️ 点击了无效区域 ({orig_x}, {orig_y})"
+        return gr.update(), "未选择", None, f"[WARNING] 点击了无效区域 ({orig_x}, {orig_y})"
 
     if not mask_solid[orig_y, orig_x]:
-        return gr.update(), gr.update(), gr.update(), "⚠️ 点击了背景区域"
+        return gr.update(), "未选择", None, "[WARNING] 点击了背景区域"
 
-    rgb = matched_rgb[orig_y, orig_x]
-    hex_color = f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+    q_rgb = tuple(int(v) for v in quantized_image[orig_y, orig_x])
+    m_rgb = tuple(int(v) for v in matched_rgb[orig_y, orig_x])
 
-    print(f"[CLICK] Coords: ({orig_x}, {orig_y}), Color: {hex_color}")
+    region_mask = _compute_connected_region_mask_4n(quantized_image, mask_solid, orig_x, orig_y)
+    cache['selected_region_mask'] = region_mask
+    cache.update(_build_selection_meta(q_rgb, m_rgb, scope="region"))
+
+    q_hex = cache['selected_quantized_hex']
+    m_hex = cache['selected_matched_hex']
+
+    print(f"[CLICK] Coords: ({orig_x}, {orig_y}), Quantized: {q_hex}, Matched: {m_hex}")
 
     display_img, status_msg = generate_highlight_preview(
         cache,
-        highlight_color=hex_color,
+        highlight_color=q_hex,
         add_loop=False
     )
 
+    display_text = f"量化色 {q_hex} | 原配准色 {m_hex}"
     if display_img is None:
-        return gr.update(), f"{hex_color} (点击处)", hex_color, status_msg
-    return display_img, f"{hex_color} (点击处)", hex_color, status_msg
+        return gr.update(), display_text, q_hex, status_msg
+
+    return display_img, display_text, q_hex, status_msg
 
 
 def generate_lut_grid_html(lut_path, lang: str = "zh"):
@@ -3090,8 +3788,29 @@ def detect_lut_color_mode(lut_path):
         return None
     
     try:
-        # .npz 格式直接识别为合并模式
         if lut_path.endswith('.npz'):
+            data = np.load(lut_path)
+            if 'rgb' in data:
+                rgb = data['rgb']
+                total_colors = int(rgb.reshape(-1, 3).shape[0])
+                stacks = data['stacks'] if 'stacks' in data else None
+                layer_count = int(stacks.shape[1]) if isinstance(stacks, np.ndarray) and stacks.ndim == 2 else None
+                max_mat = int(np.max(stacks)) if isinstance(stacks, np.ndarray) and stacks.size > 0 else None
+                if total_colors >= 2400 and total_colors < 2600 and layer_count == 6 and (max_mat is None or max_mat <= 4):
+                    print(f"[AUTO_DETECT] Detected 5-Color Extended mode from .npz ({total_colors} colors)")
+                    return "5-Color Extended"
+                if total_colors >= 2600 and total_colors <= 2800:
+                    print(f"[AUTO_DETECT] Detected 8-Color mode from .npz ({total_colors} colors)")
+                    return "8-Color Max"
+                if total_colors >= 1200 and total_colors < 1400:
+                    print(f"[AUTO_DETECT] Detected 6-Color mode from .npz ({total_colors} colors)")
+                    return "6-Color (Smart 1296)"
+                if total_colors >= 900 and total_colors < 1200:
+                    print(f"[AUTO_DETECT] Detected 4-Color mode from .npz ({total_colors} colors)")
+                    return "4-Color"
+                if total_colors >= 30 and total_colors <= 35:
+                    print(f"[AUTO_DETECT] Detected 2-Color BW mode from .npz ({total_colors} colors)")
+                    return "BW (Black & White)"
             print(f"[AUTO_DETECT] Detected Merged LUT (.npz format)")
             return "Merged"
         
@@ -3119,6 +3838,11 @@ def detect_lut_color_mode(lut_path):
         if total_colors >= 30 and total_colors <= 35:
             print(f"[AUTO_DETECT] Detected 2-Color BW mode (32 colors)")
             return "BW (Black & White)"
+        
+        # 5-Color Extended模式：~2468色 (1024 base + 1444 extended)
+        elif total_colors >= 2400 and total_colors < 2600:
+            print(f"[AUTO_DETECT] Detected 5-Color Extended mode ({total_colors} colors)")
+            return "5-Color Extended"
         
         # 8色模式：2600-2800色
         elif total_colors >= 2600 and total_colors <= 2800:
@@ -3149,27 +3873,28 @@ def detect_lut_color_mode(lut_path):
 
 def detect_image_type(image_path):
     """
-    自动检测图像类型并返回推荐的建模模式
-    
+    Detect image type and return recommended modeling mode.
+    自动检测图像类型并返回推荐的建模模式。
+
     Args:
-        image_path: 图像文件路径
-    
+        image_path (str): Image file path. (图像文件路径)
+
     Returns:
-        str: 建模模式 ("🎨 High-Fidelity (Smooth)", "📐 SVG Mode") 或 None
+        gr.update: Gradio update object with new mode, or no-op update. (Gradio 更新对象)
     """
+    import gradio as gr
     if not image_path:
-        return None
+        return gr.update()
     
     try:
-        # 检查文件扩展名
         ext = os.path.splitext(image_path)[1].lower()
         
         if ext == '.svg':
             print(f"[AUTO_DETECT] SVG file detected, recommending SVG Mode")
-            return "📐 SVG Mode"
+            return gr.update(value=ModelingMode.VECTOR)
         else:
             print(f"[AUTO_DETECT] Raster image detected ({ext}), keeping current mode")
-            return None  # 不自动切换光栅图像模式
+            return gr.update()  # 不改变当前选择
             
     except Exception as e:
         print(f"[AUTO_DETECT] Error detecting image type: {e}")
