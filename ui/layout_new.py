@@ -4501,7 +4501,7 @@ def create_converter_tab_content(lang: str, lang_state=None, theme_state=None) -
             # Make file component visible so user can download
             if file_obj is not None:
                 return file_obj, gr.update(visible=True), color_recipe_path, gr.update(visible=True), "📥 请点击下方文件下载"
-            return None, gr.update(), gr.update(), gr.update(), gr.update(), "[ERROR] 没有可下载的文件"
+            return None, gr.update(), gr.update(), gr.update(), "[ERROR] 没有可下载的文件"
         
         # Get actual file path from Gradio File object
         actual_path = None
@@ -4512,7 +4512,7 @@ def create_converter_tab_content(lang: str, lang_state=None, theme_state=None) -
                 actual_path = file_obj
         
         if not actual_path:
-            return None, gr.update(), gr.update(), gr.update(), gr.update(), "[ERROR] 生成失败，无法打开"
+            return None, gr.update(), gr.update(), gr.update(), "[ERROR] 生成失败，无法打开"
         
         status = open_in_slicer(actual_path, slicer_id)
         return file_obj, gr.update(), color_recipe_path, gr.update(), status
