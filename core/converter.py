@@ -580,6 +580,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 thickness_mm=spacer_thick,
                 structure_mode=structure_mode,
                 color_replacements=vector_replacements,
+                separate_backing=separate_backing,
             )
             vector_timing["mesh_total_s"] = time.perf_counter() - mesh_t0
             if isinstance(getattr(vec_processor, "last_stage_timings", None), dict):
