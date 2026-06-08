@@ -15,6 +15,7 @@ from PIL import Image
 from api.dependencies import get_file_registry, get_session_store
 from api.file_bridge import ndarray_to_png_bytes, pil_to_png_bytes, upload_to_ndarray
 from api.file_registry import FileRegistry
+from config import normalize_4color_mode
 from api.schemas.extractor import ExtractorManualFixRequest
 from api.schemas.responses import ExtractResponse, ManualFixResponse
 from api.session_store import SessionStore
@@ -42,7 +43,7 @@ def _image_to_png_bytes(img: object) -> bytes:
 async def extractor_extract(
     image: UploadFile = File(..., description="校准板照片"),
     corner_points: str = Form(..., description="4 个角点坐标 JSON 数组 [[x,y],...]"),
-    color_mode: str = Form("4-Color", description="校准颜色模式"),
+    color_mode: str = Form("RYBW", description="校准颜色模式"),
     page: str = Form("Page 1", description="8-Color 页码"),
     offset_x: int = Form(0, description="水平采样偏移"),
     offset_y: int = Form(0, description="垂直采样偏移"),
@@ -67,6 +68,9 @@ async def extractor_extract(
             status_code=422,
             detail=f"corner_points must contain exactly 4 points, got {len(points)}",
         )
+
+    # Normalize legacy color_mode values
+    color_mode = normalize_4color_mode(color_mode)
 
     # Convert UploadFile to ndarray
     try:

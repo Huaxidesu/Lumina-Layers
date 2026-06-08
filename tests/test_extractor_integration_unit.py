@@ -17,7 +17,12 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from api.app import app
-from api.dependencies import session_store
+from api.dependencies import (
+    get_file_registry,
+    get_session_store,
+    get_worker_pool,
+    session_store,
+)
 
 client: TestClient = TestClient(app)
 
@@ -25,6 +30,13 @@ client: TestClient = TestClient(app)
 _mock_vis: np.ndarray = np.zeros((10, 10, 3), dtype=np.uint8)
 _mock_preview: np.ndarray = np.zeros((10, 10, 3), dtype=np.uint8)
 _mock_return = (_mock_vis, _mock_preview, "/tmp/test.npy", "OK")
+
+
+def setup_module(module) -> None:
+    """Clear cross-module FastAPI dependency overrides before extractor tests."""
+    app.dependency_overrides.pop(get_session_store, None)
+    app.dependency_overrides.pop(get_file_registry, None)
+    app.dependency_overrides.pop(get_worker_pool, None)
 
 
 def _make_test_image_buf() -> io.BytesIO:
@@ -52,7 +64,7 @@ class TestCornerPointsValidation:
             files={"image": ("test.png", buf, "image/png")},
             data={
                 "corner_points": json.dumps([[0, 0], [100, 0], [100, 100]]),
-                "color_mode": "4-Color",
+                "color_mode": "RYBW",
                 "distortion": "0.0",
                 "white_balance": "false",
                 "vignette_correction": "false",
@@ -84,7 +96,7 @@ class TestSessionStatePersistence:
                     "corner_points": json.dumps(
                         [[0, 0], [100, 0], [100, 100], [0, 100]]
                     ),
-                    "color_mode": "4-Color",
+                    "color_mode": "RYBW",
                     "distortion": "0.0",
                     "white_balance": "false",
                     "vignette_correction": "false",
@@ -99,7 +111,7 @@ class TestSessionStatePersistence:
         session_data = session_store.get(session_id)
         assert session_data is not None
         assert session_data["lut_path"] == "/tmp/test.npy"
-        assert session_data["color_mode"] == "4-Color"
+        assert session_data["color_mode"] == "RYBW"
 
 
 # =========================================================================
@@ -124,7 +136,7 @@ class TestFieldNameMapping:
                     "corner_points": json.dumps(
                         [[0, 0], [100, 0], [100, 100], [0, 100]]
                     ),
-                    "color_mode": "4-Color",
+                    "color_mode": "RYBW",
                     "distortion": "0.1",
                     "white_balance": "true",
                     "vignette_correction": "true",

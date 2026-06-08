@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║                          LUMINA STUDIO v1.6.8                                 ║
+║                          LUMINA STUDIO v1.6.9                                 ║
 ║                    Multi-Material 3D Print Color System                       ║
 ╠═══════════════════════════════════════════════════════════════════════════════╣
 ║  Copyright (C) 2025 Lumina Studio Contributors                                ║
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         app = create_app()
 
         try:
-            from ui.layout_new import HEADER_CSS, DEBOUNCE_JS, FIVECOLOR_CLICK_JS, CUSTOM_TAB_HEAD_JS
+            from ui.layout_new import HEADER_CSS, DEBOUNCE_JS, DROPDOWN_SCROLL_FIX_JS, FIVECOLOR_CLICK_JS, CUSTOM_TAB_HEAD_JS
             # Import crop extension for head JS injection
             from ui.crop_extension import get_crop_head_js
             
@@ -288,7 +288,7 @@ if __name__ == "__main__":
                 favicon_path=icon_path,
                 css=CUSTOM_CSS + HEADER_CSS,
                 theme=gr.themes.Soft(),
-                head=get_platform_head_js() + get_crop_head_js() + DEBOUNCE_JS + FIVECOLOR_CLICK_JS + CUSTOM_TAB_HEAD_JS
+                head=get_platform_head_js() + get_crop_head_js() + DEBOUNCE_JS + DROPDOWN_SCROLL_FIX_JS + FIVECOLOR_CLICK_JS + CUSTOM_TAB_HEAD_JS
             )
         except Exception as e:
             print(f"❌ Failed to launch Gradio app: {e}")

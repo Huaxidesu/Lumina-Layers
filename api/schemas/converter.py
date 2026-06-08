@@ -12,7 +12,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from config import normalize_4color_mode
 
 
 # ========== Enums ==========
@@ -25,8 +27,10 @@ class ColorMode(str, Enum):
     Attributes:
         BW: Black & White grayscale mode (32 levels).
             黑白灰度模式 (32 级)。
-        FOUR_COLOR: 4-Color CMYW/RYBW mode (1024 colors).
-            4 色 CMYW/RYBW 模式 (1024 色)。
+        CMYW: 4-Color CMYW mode (1024 colors).
+            4 色 CMYW (青/品红/黄/白) 模式 (1024 色)。
+        RYBW: 4-Color RYBW mode (1024 colors).
+            4 色 RYBW (红/黄/蓝/白) 模式 (1024 色)。
         SIX_COLOR: 6-Color extended smart mode (1296 colors).
             6 色扩展智能模式 (1296 色)。
         EIGHT_COLOR: 8-Color professional mode (2738 colors).
@@ -36,7 +40,6 @@ class ColorMode(str, Enum):
     """
 
     BW = "BW (Black & White)"
-    FOUR_COLOR = "4-Color"
     CMYW = "CMYW"
     RYBW = "RYBW"
     SIX_COLOR = "6-Color (Smart 1296)"
@@ -155,7 +158,7 @@ class ConvertPreviewRequest(BaseModel):
     auto_bg: bool = Field(False, description="自动去背景")
     bg_tol: int = Field(40, ge=0, le=150, description="背景容差")
     color_mode: ColorMode = Field(
-        ColorMode.FOUR_COLOR, description="颜色模式"
+        ColorMode.RYBW, description="颜色模式"
     )
     modeling_mode: ModelingMode = Field(
         ModelingMode.HIGH_FIDELITY, description="建模模式"
@@ -163,6 +166,11 @@ class ConvertPreviewRequest(BaseModel):
     quantize_colors: int = Field(48, ge=8, le=256, description="K-Means 色彩细节")
     enable_cleanup: bool = Field(True, description="孤立像素清理")
     hue_weight: float = Field(0.0, ge=0.0, le=1.0, description="色相保护权重 (0=纯色差, 0.5=推荐, 1.0=最强)")
+
+    @field_validator("color_mode", mode="before")
+    @classmethod
+    def normalize_color_mode(cls, v: str) -> str:
+        return normalize_4color_mode(v)
 
 
 class ConvertGenerateRequest(BaseModel):
@@ -247,7 +255,7 @@ class ConvertGenerateRequest(BaseModel):
     auto_bg: bool = Field(False, description="自动去背景")
     bg_tol: int = Field(40, ge=0, le=150, description="背景容差")
     color_mode: ColorMode = Field(
-        ColorMode.FOUR_COLOR, description="颜色模式"
+        ColorMode.RYBW, description="颜色模式"
     )
     modeling_mode: ModelingMode = Field(
         ModelingMode.HIGH_FIDELITY, description="建模模式"
@@ -301,6 +309,11 @@ class ConvertGenerateRequest(BaseModel):
     free_color_set: Optional[Set[str]] = Field(
         None, description="自由色集合 (hex)"
     )
+
+    @field_validator("color_mode", mode="before")
+    @classmethod
+    def normalize_color_mode(cls, v: str) -> str:
+        return normalize_4color_mode(v)
 
 
 class ConvertBatchRequest(BaseModel):

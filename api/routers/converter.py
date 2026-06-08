@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from api.dependencies import get_file_registry, get_session_store, get_worker_pool
 from api.file_bridge import ndarray_to_png_bytes, pil_to_png_bytes, upload_to_tempfile
+from config import normalize_4color_mode
 from api.file_registry import FileRegistry
 from api.schemas.converter import (
     BedSizeItem,
@@ -195,7 +196,7 @@ async def convert_preview(
     target_width_mm: float = Form(60.0, description="目标宽度 (mm)"),
     auto_bg: bool = Form(False, description="自动去背景"),
     bg_tol: int = Form(40, description="背景容差"),
-    color_mode: str = Form("4-Color", description="颜色模式"),
+    color_mode: str = Form("RYBW", description="颜色模式"),
     modeling_mode: str = Form("high-fidelity", description="建模模式"),
     quantize_colors: int = Form(48, description="K-Means 色彩细节"),
     enable_cleanup: bool = Form(True, description="孤立像素清理"),
@@ -217,6 +218,9 @@ async def convert_preview(
     lut_path = LUTManager.get_lut_path(lut_name)
     if lut_path is None:
         raise HTTPException(status_code=404, detail=f"LUT not found: {lut_name}")
+
+    # Normalize legacy color_mode values
+    color_mode = normalize_4color_mode(color_mode)
 
     # 1. File upload (I/O, main thread)
     temp_path = await upload_to_tempfile(image)
@@ -611,7 +615,7 @@ async def convert_batch(
     structure_mode: str = Form("Double-sided", description="打印结构模式"),
     auto_bg: bool = Form(False, description="自动去背景"),
     bg_tol: int = Form(40, description="背景容差"),
-    color_mode: str = Form("4-Color", description="颜色模式"),
+    color_mode: str = Form("RYBW", description="颜色模式"),
     modeling_mode: str = Form("high-fidelity", description="建模模式"),
     quantize_colors: int = Form(48, description="K-Means 色彩细节"),
     enable_cleanup: bool = Form(True, description="孤立像素清理"),
@@ -632,6 +636,9 @@ async def convert_batch(
     lut_path = LUTManager.get_lut_path(lut_name)
     if lut_path is None:
         raise HTTPException(status_code=404, detail=f"LUT not found: {lut_name}")
+
+    # Normalize legacy color_mode values
+    color_mode = normalize_4color_mode(color_mode)
 
     # Validate modeling_mode string (main thread)
     try:
